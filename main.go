@@ -34,7 +34,7 @@ type Options struct {
 	Wait   int     `long:"wait" default:"100" description:"ms to sleep between commands (#$ wait overrides per section)"`
 	Speed  float64 `long:"speed" default:"1.0" description:"typing speed multiplier (2 = twice as fast; scales #$ delay)"`
 	Quiet  bool    `short:"q" long:"quiet" description:"do not echo the recorded session to this terminal"`
-	Human  bool    `long:"human" description:"type like a human -- jittered timing, pauses, the odd typo"`
+	Human  bool    `long:"human" description:"type like a human -- digraph-aware jittered timing and pauses"`
 	Seed   *int64  `long:"seed" description:"rng seed for --human (default: random each run, printed on start)"`
 
 	Args struct {

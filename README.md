@@ -69,21 +69,16 @@ $ asciiscript --cols 100 --rows 30 demo.sh demo.cast
 ## Human typing
 
 By default keystrokes land at a steady interval (the `#$ delay`), which reads as
-machine-typed. `--human` swaps in a small state machine (all of it in `human.go`, with timing
-and probabilities fitted to real captured typing -- see `cmd/typer`) that makes the typing look
-hand-done. All effects scale off the base delay:
+machine-typed. `--human` swaps in a timing model (all of it in `human.go`, fitted to real
+captured typing) that makes the typing look hand-done. It never fabricates mistakes, so the
+typed text always matches the script. Everything scales off the base delay:
 
 - **digraph-aware timing** -- each pause depends on the previous key: alternating hands are
   quick, same-finger reaches are slow, and there are longer pauses after spaces and punctuation.
   On top of that, per-key lognormal jitter.
 - **hesitation** -- the occasional thinking stall mid-line.
-- **mistakes** -- a **typo** (wrong neighbour key) or an **omission** (a skipped char). You
-  often type on a key or two before noticing, pause, then correct: **backspacing** if the slip
-  is close, or **arrowing back and fixing in place** if it's further away. The final command is
-  always correct -- corrections happen within the recorded keystrokes.
 
-Mistakes default to ~3% of keys (a calmer rate than natural typing); tune the constants at the
-top of `human.go` to taste.
+Tune the constants at the top of `human.go` to taste.
 
 It's driven by a seeded rng, so a run is reproducible: the seed is random by default and printed
 on start (`asciiscript: human typing (seed 12345)`); pass `--seed 12345` to replay a take you liked.
