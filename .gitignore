@@ -1,6 +1,4 @@
 /asciiscript
-/typer
 /bin/
 *.sh
 *.cast
-*.jsonl

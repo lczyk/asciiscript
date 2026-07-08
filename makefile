@@ -1,7 +1,5 @@
 .SUFFIXES:
 
-# build/install target the root asciiscript binary only. cmd/typer is a dev-only
-# capture tool -- run it with `go run ./cmd/typer`; it is never built or installed.
 SRCS := $(wildcard *.go)
 
 help:  ## Show this help

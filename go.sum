@@ -6,5 +6,3 @@ github.com/lczyk/assert v0.7.1 h1:tPT19OOZYqXpHziF7LpY26Ra/99kO93bfxWpQ9i/sbQ=
 github.com/lczyk/assert v0.7.1/go.mod h1:Vv3LWPfjC/FbJ3IXb22YNWxZWicc1x6R7hzDCf+RARc=
 golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=
 golang.org/x/sys v0.46.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
-golang.org/x/term v0.44.0 h1:0rLvDRCtNj0gZkyIXhCyOb2OAzEhLVqc4B+hrsBhrmc=
-golang.org/x/term v0.44.0/go.mod h1:7ze4MdzUzLXpSAoFP1H0bOI9aXDqveSvatT5vKcFh2Y=
