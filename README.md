@@ -58,34 +58,39 @@ in bash syntax.
     --wait     ms to sleep between commands (default 100; #$ wait overrides)
     --speed    typing speed multiplier (default 1; 2 = twice as fast, scales #$ delay)
 -q, --quiet    don't mirror the recorded session to this terminal
-    --human    type like a human (see below)
-    --seed     rng seed for --human (default: random each run, printed on start)
+    --jitter   human-jitter scale (default 1; 0 = uniform/off, see below)
+    --seed     rng seed for --jitter (default: random each run, printed on start)
 ```
 
 ```sh
 $ asciiscript --cols 100 --rows 30 demo.sh demo.cast
 ```
 
-## Human typing
+## Jitter
 
-By default keystrokes land at a steady interval (the `#$ delay`), which reads as
-machine-typed. `--human` swaps in a timing model (all of it in `human.go`, fitted to real
-captured typing) that makes the typing look hand-done. It never fabricates mistakes, so the
-typed text always matches the script. Everything scales off the base delay:
+By default the typing is jittered to look hand-done rather than machine-uniform. The model
+(all of it in `jitter.go`, fitted to real captured typing) shapes only the timing -- it never
+alters the text, so a recording always types the script exactly. Everything scales off the
+base delay (`#$ delay`):
 
 - **digraph-aware timing** -- each pause depends on the previous key: alternating hands are
   quick, same-finger reaches are slow, and there are longer pauses after spaces and punctuation.
   On top of that, per-key lognormal jitter.
 - **hesitation** -- the occasional thinking stall mid-line.
 
-Tune the constants at the top of `human.go` to taste.
+`--jitter <scale>` sets the intensity: `1` (default) is the full human-like effect, values
+below `1` ease it back toward uniform, and `0` is exactly uniform (steady `#$ delay` between
+keys). Tune the model's constants at the top of `jitter.go` to taste.
 
-It's driven by a seeded rng, so a run is reproducible: the seed is random by default and printed
-on start (`asciiscript: human typing (seed 12345)`); pass `--seed 12345` to replay a take you liked.
+When jitter is on it's driven by a seeded rng, so a run is reproducible: the seed is random by
+default and printed on start (`asciiscript: jitter 1 (seed 12345)`); pass `--seed 12345` to
+replay a take you liked.
 
 ```sh
-$ asciiscript --human demo.sh demo.cast          # fresh randomness, seed printed
-$ asciiscript --human --seed 12345 demo.sh demo.cast   # reproduce a specific take
+$ asciiscript demo.sh demo.cast                    # jittered (default), seed printed
+$ asciiscript --jitter 0.5 demo.sh demo.cast       # subtler
+$ asciiscript --jitter 0 demo.sh demo.cast         # uniform / machine-steady
+$ asciiscript --seed 12345 demo.sh demo.cast       # reproduce a specific take
 ```
 
 ## Notes
