@@ -34,8 +34,8 @@ type Options struct {
 	Wait   int     `long:"wait" default:"100" description:"ms to sleep between commands (#$ wait overrides per section)"`
 	Speed  float64 `long:"speed" default:"1.0" description:"typing speed multiplier (2 = twice as fast; scales #$ delay)"`
 	Quiet  bool    `short:"q" long:"quiet" description:"do not echo the recorded session to this terminal"`
-	Human  bool    `long:"human" description:"type like a human -- digraph-aware jittered timing and pauses"`
-	Seed   *int64  `long:"seed" description:"rng seed for --human (default: random each run, printed on start)"`
+	Jitter float64 `long:"jitter" default:"1.0" description:"human-jitter scale (1 = human-like, 0 = uniform/off)"`
+	Seed   *int64  `long:"seed" description:"rng seed for --jitter (default: random each run, printed on start)"`
 
 	Args struct {
 		Script  string `positional-arg-name:"script" description:"script to type"`
@@ -88,39 +88,15 @@ func NewShell(cmd string) Shell {
 	return Shell{Cmd: cmd}
 }
 
-// Run types the command one rune at a time, pausing Delay between keystrokes.
+// Run types the command by replaying the jitter subsystem's keystroke plan:
+// write the bytes, then sleep the planned pause.
 func (s Shell) Run(sc *Script) {
-	base := sc.base()
-	var ks []keystroke
-	if sc.human != nil {
-		ks = sc.human.plan(s.Cmd, base)
-	} else {
-		ks = uniform(s.Cmd, base)
-	}
-	for _, k := range ks {
+	for _, k := range sc.jitter.plan(s.Cmd, sc.base()) {
 		if _, err := io.WriteString(sc.pty, k.data); err != nil {
 			log.Fatal("writing to pty failed: ", err)
 		}
 		time.Sleep(k.pause)
 	}
-}
-
-// keystroke is one unit of typing: bytes to write, then a pause. It's the
-// interface between the human-typing subsystem (which plans them) and Shell.Run
-// (which replays them).
-type keystroke struct {
-	data  string
-	pause time.Duration
-}
-
-// uniform types each rune with the same delay -- the default, machine-steady
-// typing used when --human is off.
-func uniform(line string, delay time.Duration) []keystroke {
-	ks := make([]keystroke, 0, len(line))
-	for _, r := range line {
-		ks = append(ks, keystroke{string(r), delay})
-	}
-	return ks
 }
 
 // Wait changes the interval between subsequent commands.
@@ -178,9 +154,9 @@ type Script struct {
 	Delay    time.Duration // between keystrokes
 	Wait     time.Duration // between commands
 
-	speed float64        // typing-speed multiplier applied to Delay (1 = as written)
-	pty   io.WriteCloser // pty master; keystrokes get written here
-	human *human         // non-nil when --human is on; drives natural typing
+	speed  float64        // typing-speed multiplier applied to Delay (1 = as written)
+	pty    io.WriteCloser // pty master; keystrokes get written here
+	jitter *jitter        // plans the human-like keystroke timing
 }
 
 // base is the effective per-keystroke delay: the current Delay scaled by the
@@ -309,14 +285,19 @@ func (s *Script) Run(o *Options) error {
 	}
 	s.speed = o.Speed
 
-	if o.Human {
-		seed := time.Now().UnixNano()
-		if o.Seed != nil {
-			seed = *o.Seed
-		}
-		fmt.Fprintf(os.Stderr, "asciiscript: human typing (seed %d)\n", seed)
-		s.human = newHuman(seed)
+	if o.Jitter < 0 {
+		return fmt.Errorf("--jitter must be >= 0 (got %g)", o.Jitter)
 	}
+	seed := time.Now().UnixNano()
+	if o.Seed != nil {
+		seed = *o.Seed
+	}
+	if o.Jitter > 0 {
+		// the seed only matters when jitter is active; print it so a good take
+		// can be reproduced with --seed.
+		fmt.Fprintf(os.Stderr, "asciiscript: jitter %g (seed %d)\n", o.Jitter, seed)
+	}
+	s.jitter = newJitter(o.Jitter, seed)
 
 	shellCmd, cleanup, err := bashCommand()
 	if err != nil {
