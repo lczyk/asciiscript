@@ -29,7 +29,7 @@ sleep 1 && echo "We can wait for output..."
 #$ wait 500
 echo "Because otherwise, things could get a bit weird."
 
-echo "I hope you like it!"
+echo 'I hope you like it!'
 ```
 
 Then record it.
@@ -48,6 +48,9 @@ Two control commands, both in milliseconds:
 Scripts run in a clean `bash` -- a minimal coloured prompt from a throwaway rcfile, no user
 dotfiles, macOS deprecation banner silenced -- so demos come out consistent. Write the script
 in bash syntax.
+
+More scripts to record and crib from live in [`examples/`](examples), along with the
+gotchas worth knowing before you write your own.
 
 ## Flags
 

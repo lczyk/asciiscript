@@ -1,4 +1,5 @@
 /asciiscript
 /bin/
 *.sh
+!/examples/*.sh
 *.cast
