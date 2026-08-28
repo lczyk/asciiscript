@@ -53,7 +53,7 @@ func (j *jitter) plan(line string, base time.Duration) []keystroke {
 //   - the occasional hesitation
 func (j *jitter) pauseFor(prev, ch rune, base time.Duration) time.Duration {
 	s := j.scale
-	mult := 1 + (transMult(prev, ch)-1)*s
+	mult := max(1+(transMult(prev, ch)-1)*s, minTransMult)
 	p := float64(base) * mult * math.Exp(j.rng.NormFloat64()*jitterSigma*s)
 	d := time.Duration(p)
 	if j.rng.Float64() < hesitationProb {
@@ -68,8 +68,8 @@ func (j *jitter) factor(base time.Duration, min, max float64) time.Duration {
 }
 
 func clampPause(p, base time.Duration) time.Duration {
-	if p < 0 {
-		return 0
+	if floor := time.Duration(float64(base) * pauseFloorFactor); p < floor {
+		return floor
 	}
 	if ceil := time.Duration(float64(base) * pauseCeilFactor); p > ceil {
 		return ceil
@@ -92,11 +92,20 @@ const (
 	sameHandFactor   = 1.0 // letter->letter, same hand, different finger
 	sameFingerFactor = 1.3 // letter->letter, same finger (slow reach)
 
+	// Floor on the faded digraph multiplier. The sub-1 factors above go
+	// negative past a scale of ~10, which would make a big --jitter type
+	// faster and flatter -- the opposite of what it asks for.
+	minTransMult = 0.1
+
 	hesitationProb = 0.08 // chance of a thinking stall per key
 	hesitationMin  = 2.5
 	hesitationMax  = 4.0
 
-	pauseCeilFactor = 25.0 // hard cap so no gap reads as a hang
+	// Hard bounds on a pause, either side of the base delay: nothing reads as a
+	// hang, and nothing arrives instantly. Both matter most at a big --jitter,
+	// where the lognormal spans orders of magnitude.
+	pauseFloorFactor = 0.1
+	pauseCeilFactor  = 25.0
 )
 
 // transMult is the unscaled timing multiplier for typing ch right after prev.

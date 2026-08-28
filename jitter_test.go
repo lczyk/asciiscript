@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -71,4 +72,31 @@ func TestTransMultDigraphs(t *testing.T) {
 		"alt-hand (th) should be quicker than same-finger (ec)")
 	assert.Equal(t, transMult(' ', 'a'), spaceFactor)
 	assert.Equal(t, transMult('.', 'a'), punctFactor)
+}
+
+// --jitter asks for more variation, so cranking it must not quietly turn into
+// less. The sub-1 digraph factors fade towards a negative multiplier past a
+// scale of ~10; unfloored, that collapses alternating-hand pairs -- half the
+// keystrokes in ordinary prose -- to no pause at all.
+func TestJitterStaysHumanAtHighScales(t *testing.T) {
+	base := 40 * time.Millisecond
+	floor := time.Duration(float64(base) * pauseFloorFactor)
+	ceil := time.Duration(float64(base) * pauseCeilFactor)
+
+	for _, scale := range []float64{2, 5, 11, 20, 100} {
+		var under, over int
+		for seed := int64(0); seed < 200; seed++ {
+			for _, k := range newJitter(scale, seed).plan("the quick brown fox\n", base) {
+				if k.pause < floor {
+					under++
+				}
+				if k.pause > ceil {
+					over++
+				}
+			}
+		}
+		at := " at scale " + strconv.FormatFloat(scale, 'g', -1, 64)
+		assert.Equal(t, under, 0, "every pause should be a real gap"+at)
+		assert.Equal(t, over, 0, "no pause should read as a hang"+at)
+	}
 }
