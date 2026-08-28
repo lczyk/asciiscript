@@ -1,6 +1,6 @@
 .SUFFIXES:
 
-SRCS := $(wildcard *.go)
+SRCS := $(filter-out version_gen.go,$(wildcard *.go))
 
 help:  ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^##@/ {printf "\n\033[1m%s\033[0m\n", substr($$0, 5)} /^[a-zA-Z_.\/-]+:.*?## / {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -8,12 +8,19 @@ help:  ## Show this help
 .PHONY: build
 build: ./bin/asciiscript  ## Build the binary into ./bin (upx-compressed if available)
 
-./bin/asciiscript: $(SRCS) makefile go.mod go.sum
+./bin/asciiscript: $(SRCS) generate-version makefile go.mod go.sum
 	mkdir -p ./bin
 	go build -o ./bin/asciiscript .
 	@if command -v upx >/dev/null 2>&1; then \
 		upx ./bin/asciiscript || echo "upx failed, skipping compression"; \
 	fi
+
+# Phony on purpose: version_gen.go embeds the current commit sha and dirty
+# flag, so it is regenerated every build rather than dated against sources --
+# which is also why SRCS excludes it.
+.PHONY: generate-version
+generate-version:  ## Regenerate version_gen.go from VERSION and the git state
+	go run github.com/lczyk/version/go/cmd/generate-version -out version_gen.go -pkg main -init
 
 .PHONY: install
 install: ./bin/asciiscript  ## Symlink the binary into ~/.local/bin
@@ -22,14 +29,14 @@ install: ./bin/asciiscript  ## Symlink the binary into ~/.local/bin
 
 .PHONY: clean
 clean:  ## Remove build artifacts
-	rm -f ./bin/asciiscript
+	rm -f ./bin/asciiscript version_gen.go
 
 .PHONY: test
-test:  ## Run the test suite with the race detector
+test: generate-version  ## Run the test suite with the race detector
 	go test -race ./...
 
 .PHONY: lint
-lint:  ## go vet + gofmt check (no writes)
+lint: generate-version  ## go vet + gofmt check (no writes)
 	go vet ./...
 	@out=$$(gofmt -s -l .); \
 	if [ -n "$$out" ]; then \

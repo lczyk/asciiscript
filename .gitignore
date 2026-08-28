@@ -3,3 +3,4 @@
 *.sh
 !/examples/*.sh
 *.cast
+/version_gen.go

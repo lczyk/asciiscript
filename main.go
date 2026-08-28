@@ -47,6 +47,10 @@ type Options struct {
 	CmdSync int     `long:"cmd-timeout" default:"600000" description:"ms to wait for a command to finish before typing on regardless"`
 	Seed    *int64  `long:"seed" description:"rng seed for --jitter (default: random each run, printed on start)"`
 
+	// Handled before parsing, since --version has no business needing the
+	// positional args; declared here only so it shows up in --help.
+	Version bool `short:"v" long:"version" description:"print the version and exit"`
+
 	Args struct {
 		Script  string `positional-arg-name:"script" description:"script to type"`
 		Outfile string `positional-arg-name:"outfile" description:"output .cast file"`
@@ -55,6 +59,11 @@ type Options struct {
 
 func main() {
 	log.SetFlags(0)
+
+	if wantsVersion(os.Args[1:]) {
+		fmt.Println(versionLine())
+		os.Exit(0)
+	}
 
 	var opts Options
 	parser := flags.NewParser(&opts, flags.Default)
