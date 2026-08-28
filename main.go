@@ -20,6 +20,7 @@ import (
 
 	"github.com/creack/pty"
 	flags "github.com/jessevdk/go-flags"
+	"golang.org/x/term"
 )
 
 // CtrlPrefix marks a control line in a script, e.g. "#$ delay 100".
@@ -148,6 +149,19 @@ func NewDelay(opts []string) (Delay, error) {
 
 func (d Delay) Run(sc *Script) error { sc.Delay = d.Interval; return nil }
 
+// Handover gives the next line to whoever is running the recording: it gets
+// typed as usual, and then the real keyboard is wired to the recorded session
+// until the command they were handed ends. For the commands nothing else can
+// drive -- an editor, a REPL, anything wanting a keypress -- and the session
+// records what they do exactly as if it had been typed by the script.
+type Handover struct{}
+
+func (h Handover) Run(s *Script) error {
+	s.handover = true
+	fmt.Fprintln(s.warn, "asciiscript: the next command is yours -- the script picks up again once it drops you back at a prompt")
+	return nil
+}
+
 // NewCtrl parses a control command (the text after the "#$" prefix).
 func NewCtrl(cmd string) (Command, error) {
 	tokens := strings.Split(cmd, " ")
@@ -156,6 +170,8 @@ func NewCtrl(cmd string) (Command, error) {
 		return NewDelay(tokens[1:])
 	case "wait":
 		return NewWait(tokens[1:])
+	case "handover":
+		return Handover{}, nil
 	default:
 		return nil, ErrUnknownCtrl
 	}
@@ -177,6 +193,13 @@ type Script struct {
 	// anyway. Zero disables the wait, leaving Wait as the only spacing.
 	syncFor time.Duration
 	warn    io.Writer // where warnings go; never the pty, which is being recorded
+
+	keys     *keyboard // the real terminal's input, on loan during a handover
+	handover bool      // armed by `#$ handover`, spent by the next line typed
+
+	// raw puts the real terminal into raw mode for the duration of a handover
+	// and returns the undo. Tests swap it out for one without a terminal.
+	raw func() (func(), error)
 
 	// sleep waits between keystrokes and commands, giving up early if the run
 	// is interrupted. Tests swap it out to replay a script without waiting.
@@ -229,8 +252,10 @@ func parseScript(text string) (*Script, error) {
 		speed: 1.0,
 		mon:   &mirror{},
 		warn:  os.Stderr,
+		keys:  &keyboard{in: os.Stdin},
 	}
 	s.sleep = s.wait
+	s.raw = s.rawStdin
 
 	lines := strings.Split(text, "\n")
 	if n := len(lines); n > 0 && lines[n-1] == "" {
@@ -574,6 +599,116 @@ func (s *Script) syncPrompt(line string, before int) error {
 	return nil
 }
 
+// keyboard carries the real terminal's input into the recorded session while a
+// handover is live, and drops it the rest of the time -- a stray keypress during
+// automated typing is not something the recording should contain.
+//
+// Reading starts with the first handover and never stops: a Read already parked
+// on the terminal can't be called off, so anything else would leave a keystroke
+// stranded in a goroutine, to surface at whatever moment it eventually returns.
+type keyboard struct {
+	in      io.Reader
+	started bool
+
+	mu sync.Mutex
+	to io.Writer // where input goes, nil between handovers
+}
+
+func (k *keyboard) pump() {
+	buf := make([]byte, 256)
+	for {
+		n, err := k.in.Read(buf)
+		if n > 0 {
+			k.mu.Lock()
+			if k.to != nil {
+				_, _ = k.to.Write(buf[:n])
+			}
+			k.mu.Unlock()
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// lend routes the keyboard to w until the returned func takes it back.
+func (k *keyboard) lend(w io.Writer) func() {
+	if !k.started {
+		k.started = true
+		go k.pump()
+	}
+	k.mu.Lock()
+	k.to = w
+	k.mu.Unlock()
+	return func() {
+		k.mu.Lock()
+		k.to = nil
+		k.mu.Unlock()
+	}
+}
+
+// rawStdin is the default Script.raw: raw mode means the keys a handed-over
+// command wants -- ctrl-o, ctrl-x, arrows -- reach it as themselves rather than
+// being buffered into lines or turned into signals, and stops the terminal
+// echoing input that the recorded session is already echoing back.
+func (s *Script) rawStdin() (func(), error) {
+	fd := int(os.Stdin.Fd())
+	prev, err := term.MakeRaw(fd)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't put the terminal in raw mode: %w", err)
+	}
+	return func() { _ = term.Restore(fd, prev) }, nil
+}
+
+// handOver types nothing and waits for nobody: the person running the recording
+// drives the command that was just typed, and the script resumes when they land
+// back at a prompt. There is no deadline -- the wait is on a human.
+func (s *Script) handOver(before int) error {
+	restore, err := s.raw()
+	if err != nil {
+		return err
+	}
+	defer restore()
+
+	back := s.keys.lend(s.pty)
+	defer back()
+
+	for s.mon.marked() <= before {
+		if err := s.sleep(syncPoll); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkHandover rejects the settings a `#$ handover` script can't work under.
+// All three are silent traps otherwise: the person driving would be typing into
+// a session they can't see, or one that will never give the terminal back.
+func checkHandover(wants bool, o *Options) error {
+	if !wants {
+		return nil
+	}
+	switch {
+	case o.Quiet:
+		return errors.New("`#$ handover` needs the session on screen to be driven, so it can't be recorded with --quiet")
+	case o.NoSync:
+		return errors.New("`#$ handover` ends when the shell comes back to a prompt, which --no-sync is what stops asciiscript watching for")
+	case !term.IsTerminal(int(os.Stdin.Fd())):
+		return errors.New("`#$ handover` needs a keyboard to hand over to, and stdin isn't a terminal")
+	}
+	return nil
+}
+
+// hasHandover reports whether the script hands the terminal over at any point.
+func (s *Script) hasHandover() bool {
+	for _, c := range s.Commands {
+		if _, ok := c.(Handover); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // typeAll gives asciinema time to warm up, then runs every parsed command in
 // order, waiting for each to finish and then pausing before the next. The shell
 // prints its prompt almost immediately, but asciinema doesn't start forwarding
@@ -602,8 +737,16 @@ func (s *Script) typeAll(settle time.Duration) error {
 				return err
 			}
 		}
-		if typing && s.syncFor > 0 {
-			if err := s.syncPrompt(sh.Cmd, before); err != nil {
+		if typing {
+			var err error
+			switch {
+			case s.handover:
+				s.handover = false
+				err = s.handOver(before)
+			case s.syncFor > 0:
+				err = s.syncPrompt(sh.Cmd, before)
+			}
+			if err != nil {
 				return err
 			}
 		}
@@ -670,6 +813,9 @@ func (s *Script) Run(o *Options) error {
 	if o.CmdSync <= 0 {
 		return fmt.Errorf("--cmd-timeout must be greater than 0 (got %d)", o.CmdSync)
 	}
+	if err := checkHandover(s.hasHandover(), o); err != nil {
+		return err
+	}
 	seed := time.Now().UnixNano()
 	if o.Seed != nil {
 		seed = *o.Seed
@@ -726,6 +872,11 @@ func (s *Script) Run(o *Options) error {
 	)
 
 	cols, rows := termSize(o)
+	if s.hasHandover() {
+		if ws, err := pty.GetsizeFull(os.Stdin); err == nil && (ws.Cols != cols || ws.Rows != rows) {
+			fmt.Fprintf(s.warn, "asciiscript: recording at %dx%d but this terminal is %dx%d -- a handed-over command will draw itself to the wrong size\n", cols, rows, ws.Cols, ws.Rows)
+		}
+	}
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: cols, Rows: rows})
 	if err != nil {
 		return fmt.Errorf("couldn't start recording: %w", err)
