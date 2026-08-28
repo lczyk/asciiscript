@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // keystroke is one unit of typing: bytes to write, then a pause to sleep after.
@@ -34,13 +35,16 @@ func newJitter(scale float64, seed int64) *jitter {
 	return &jitter{rng: rand.New(rand.NewSource(seed)), scale: scale}
 }
 
-// plan turns a line into keystrokes typed at the given base per-key delay.
+// plan turns a line into keystrokes typed at the given base per-key delay. Each
+// keystroke carries the line's own bytes rather than a re-encoded rune, so a
+// script that isn't valid UTF-8 still types exactly as written.
 func (j *jitter) plan(line string, base time.Duration) []keystroke {
-	runes := []rune(line)
-	ks := make([]keystroke, 0, len(runes))
+	ks := make([]keystroke, 0, len(line))
 	var prev rune
-	for _, ch := range runes {
-		ks = append(ks, keystroke{string(ch), j.pauseFor(prev, ch, base)})
+	for i, w := 0, 0; i < len(line); i += w {
+		var ch rune
+		ch, w = utf8.DecodeRuneInString(line[i:])
+		ks = append(ks, keystroke{line[i : i+w], j.pauseFor(prev, ch, base)})
 		prev = ch
 	}
 	return ks

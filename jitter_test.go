@@ -100,3 +100,14 @@ func TestJitterStaysHumanAtHighScales(t *testing.T) {
 		assert.Equal(t, over, 0, "no pause should read as a hang"+at)
 	}
 }
+
+// The model shapes timing, never text -- including for a script that isn't
+// valid UTF-8. Planning through []rune would silently retype a stray byte as
+// the replacement character.
+func TestJitterTypesInvalidUTF8Verbatim(t *testing.T) {
+	for _, line := range []string{"\xd7", "echo \"caf\xe9\"\n", "\xff\xfe\x00", "ok\n"} {
+		ks := newJitter(1, 7).plan(line, 40*time.Millisecond)
+		assert.Equal(t, replay(ks), line)
+		assert.Equal(t, len(ks), len([]rune(line)), line) // one keystroke per rune-or-stray-byte
+	}
+}
