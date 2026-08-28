@@ -1,4 +1,4 @@
-module github.com/christopher-dG/asciiscript
+module github.com/lczyk/asciiscript
 
 go 1.26.4
 
