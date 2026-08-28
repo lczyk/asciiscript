@@ -24,10 +24,10 @@ echo "We can type slow..."
 #$ delay 10
 echo "Or quite fast."
 
-#$ wait 100  - Time between commands for subsequent commands (milliseconds).
-sleep 1 && echo "We can wait for output..."
+#$ wait 100  - Pause after each command finishes, before the next (milliseconds).
+sleep 1 && echo "The next line waits for this to finish on its own..."
 #$ wait 500
-echo "Because otherwise, things could get a bit weird."
+echo "...and then this one gets a longer beat before it."
 
 echo 'I hope you like it!'
 ```
@@ -42,8 +42,9 @@ $ asciinema play demo.cast
 Two control commands, both in milliseconds:
 
 - `#$ delay N` -- time between keypresses (typing speed). Default 40.
-- `#$ wait N` -- time between commands. Default 100. Set this comfortably above a
-  command's runtime, or the next input gets typed while it's still running.
+- `#$ wait N` -- pause after a command finishes, before the next one is typed. Default 100.
+  It's breathing room, not a runtime guess: waiting for the command itself is automatic
+  (see [Waiting](#waiting)).
 
 Scripts run in a clean `bash` -- a minimal coloured prompt from a throwaway rcfile, no user
 dotfiles, macOS deprecation banner silenced -- so demos come out consistent. Write the script
@@ -58,15 +59,39 @@ gotchas worth knowing before you write your own.
     --cols     terminal width in columns (default: current terminal, else 80)
     --rows     terminal height in rows (default: current terminal, else 24)
     --settle   ms to wait for asciinema to warm up before typing (default 2000)
-    --wait     ms to sleep between commands (default 100; #$ wait overrides)
+    --wait     ms to pause after each command finishes (default 100; #$ wait overrides)
     --speed    typing speed multiplier (default 1; 2 = twice as fast, scales #$ delay)
 -q, --quiet    don't mirror the recorded session to this terminal
     --jitter   human-jitter scale (default 1; 0 = uniform/off, see below)
     --seed     rng seed for --jitter (default: random each run, printed on start)
+    --timeout  ms to wait for asciinema to stop after the script ends (default 10000)
+    --no-sync  type the next command without waiting for the previous one to finish
+    --cmd-timeout
+               ms a command gets to finish before typing carries on (default 600000)
 ```
 
 ```sh
 $ asciiscript --cols 100 --rows 30 demo.sh demo.cast
+```
+
+## Waiting
+
+Each command is typed only once the previous one has finished. `#$ wait` is the pause on
+top of that, so a ten-minute build needs no `#$ wait 600000` -- the recording just takes
+ten minutes, and asciinema's `idle_time_limit` compresses the dead air on playback.
+
+This works by giving the recorded shell's prompt an invisible marker (an OSC 133 sequence,
+carrying a token unique to the run) and watching for it. `PS2` carries it too, so heredocs
+and lines continued with a trailing `\` wait like anything else.
+
+The exception is a command that never returns to a prompt by itself -- an editor, a pager,
+`ssh`, anything reading stdin. There's nothing to wait for: the keystrokes that would end it
+are the ones being held back. Those run out `--cmd-timeout` (10 minutes by default), print a
+warning naming the command, and get typed over anyway. If your script has one, record with
+`--no-sync` and go back to sizing `#$ wait` by hand:
+
+```sh
+$ asciiscript --no-sync editing-demo.sh demo.cast
 ```
 
 ## Jitter
@@ -103,3 +128,11 @@ $ asciiscript --seed 12345 demo.sh demo.cast       # reproduce a specific take
 - asciinema is run with `--quiet`, and its startup terminal queries (colour palette, cursor
   position, ...) are stripped from the live mirror -- otherwise the terminal's replies leak
   onto your shell prompt once recording ends.
+- asciinema doesn't accept input for a second or two after launch, which is what `--settle`
+  covers. Set it too low and every keystroke lands in the void, so the first line typed is
+  checked for its echo and the run stops with an error rather than writing an empty recording.
+- The script ends by typing `exit`. Anything still holding the terminal at that point -- a
+  pager, an unterminated quote, a command reading stdin -- swallows it, so asciinema is given
+  `--timeout` to stop and is killed after that.
+- `Ctrl-C` stops the recording rather than abandoning it: asciinema is told to stop so it can
+  flush what it has, and the temporary rcfile is cleaned up.

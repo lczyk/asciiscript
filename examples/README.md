@@ -31,14 +31,19 @@ $ asciiscript --seed 12345 examples/git.sh out.cast      # reproduce a take you 
 - **Only `#$` lines are control lines.** Every other line is typed into the shell, ordinary
   `#` comments included -- they show up in the recording. Useful for narration, easy to
   forget when you write a header comment nobody was meant to see.
-- **Anything that pages will hang.** The recorded session is a real terminal, so `git log`,
-  `git diff`, `man` and friends open `less` and wait for a keypress the script never types.
-  Set `PAGER=cat` (or `GIT_PAGER=cat`, or pass `--no-pager`).
+- **Anything that pages will stall the take.** The recorded session is a real terminal, so
+  `git log`, `git diff`, `man` and friends open `less` and wait for a keypress the script never
+  types. Waiting can't help here -- the keystrokes that would dismiss the pager are the ones
+  being held back -- so the line burns `--cmd-timeout`, warns, and the run then fails on
+  `--timeout` instead of finishing. Set `PAGER=cat` (or `GIT_PAGER=cat`, or pass `--no-pager`).
+  Same for editors and anything else reading stdin: if a script genuinely needs one, record it
+  with `--no-sync` and size every `#$ wait` by hand.
 - **Mind the `!`.** The recorded shell is interactive, so history expansion is on and
   `echo "done!"` dies with `bash: !": event not found`. Single-quote the string, or start the
   script with `set +H`.
-- **Set `#$ wait` above the command's runtime.** Too low and the next line gets typed while
-  the previous command is still running.
+- **`#$ wait` is breathing room, not a runtime guess.** Each line is typed only once the
+  previous command has finished, so a slow build needs no padding -- `#$ wait` is the extra
+  beat on top, for letting output be read.
 - **Start from a clean slate.** Work in a scratch directory the script clears on its first
   line, or a second take begins from whatever the first one left behind. The same goes for
   config a tool reads from `$HOME` -- neutralise it if the demo should look the same

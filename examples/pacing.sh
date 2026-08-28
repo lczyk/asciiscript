@@ -15,7 +15,7 @@ echo "A long wait after this one lets the output breathe."
 echo "See? Room to look at the previous line."
 
 #$ wait 2500
-sleep 2 && echo "Two seconds of work, and a 2.5s wait to cover it."
+sleep 2 && echo "Slow work needs no padding -- the next line waits for it."
 
 #$ wait 400
 echo "Back to a normal pace."
