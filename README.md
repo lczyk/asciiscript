@@ -43,7 +43,8 @@ Three control commands:
 
 - `#$ delay N` -- time between keypresses (typing speed), in ms. Default 40.
 - `#$ wait N` -- pause after a command finishes, before the next one is typed, in ms.
-  Default 100. It's breathing room, not a runtime guess: waiting for the command itself is
+  Default 100. The pause belongs to the line below it, so a `#$ wait` slows down the very
+  next command. It's breathing room, not a runtime guess: waiting for the command itself is
   automatic (see [Waiting](#waiting)).
 - `#$ handover` -- give the next command to whoever is running the recording. Takes no
   argument (see [Handover](#handover)).
@@ -82,6 +83,7 @@ $ asciiscript --cols 100 --rows 30 demo.sh demo.cast
 Each command is typed only once the previous one has finished. `#$ wait` is the pause on
 top of that, so a ten-minute build needs no `#$ wait 600000` -- the recording just takes
 ten minutes, and asciinema's `idle_time_limit` compresses the dead air on playback.
+Control lines cost nothing themselves; only typed commands get a pause.
 
 This works by giving the recorded shell's prompt an invisible marker (an OSC 133 sequence,
 carrying a token unique to the run) and watching for it. `PS2` carries it too, so heredocs
@@ -143,7 +145,7 @@ base delay (`#$ delay`):
 
 `--jitter <scale>` sets the intensity: `1` (default) is the full human-like effect, values
 below `1` ease it back toward uniform, and `0` is exactly uniform (steady `#$ delay` between
-keys). Tune the model's constants at the top of `jitter.go` to taste.
+keys). Tune the model's constants in `jitter.go` to taste.
 
 When jitter is on it's driven by a seeded rng, so a run is reproducible: the seed is random by
 default and printed on start (`asciiscript: jitter 1 (seed 12345)`); pass `--seed 12345` to

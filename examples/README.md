@@ -7,12 +7,13 @@ $ asciiscript examples/hello.sh hello.cast
 $ asciinema play hello.cast
 ```
 
-- **`hello.sh`** -- the README demo. The smallest thing that shows both control commands.
+- **`hello.sh`** -- the README demo. The smallest thing that shows `#$ delay` and `#$ wait`.
 - **`pacing.sh`** -- `#$ delay` and `#$ wait` in anger: fast lines, slow lines, and giving
   output room to breathe.
 - **`handover.sh`** -- `#$ handover` in practice: the script sets a file up, hands you the
   editor to change one line, and carries on once you quit. Needs a real terminal, so run it
-  yourself rather than from a pipe.
+  yourself rather than from a pipe -- and `nano`, which ships on macOS and most desktop
+  Linux but not on minimal images; swap in whatever editor you have.
 - **`git.sh`** -- a full workflow (init, edit, commit, log) run in a scratch directory under
   `/tmp` that the script clears out first, so takes are repeatable. Its one `export` line is
   doing real work: `GIT_PAGER=cat` stops `git log` and `git diff` opening `less` and hanging,

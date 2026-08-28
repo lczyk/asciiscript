@@ -8,9 +8,9 @@ echo "We can type slow..."
 #$ delay 10
 echo "Or quite fast."
 
-#$ wait 100  - Time between commands for subsequent commands (milliseconds).
-sleep 1 && echo "We can wait for output..."
+#$ wait 100  - Pause after each command finishes, before the next (milliseconds).
+sleep 1 && echo "The next line waits for this to finish on its own..."
 #$ wait 500
-echo "Because otherwise, things could get a bit weird."
+echo "...and then this one gets a longer beat before it."
 
 echo 'I hope you like it!'
