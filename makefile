@@ -18,9 +18,15 @@ build: ./bin/asciiscript  ## Build the binary into ./bin (upx-compressed if avai
 # Phony on purpose: version_gen.go embeds the current commit sha and dirty
 # flag, so it is regenerated every build rather than dated against sources --
 # which is also why SRCS excludes it.
+#
+# Failure is not fatal: the generator needs a git checkout, and a source tarball
+# or a Docker context without .git/ has none. Without version_gen.go the
+# defaults in version.go stand and --version reports 0.0.0-dev, which is the
+# documented fallback -- far better than refusing to build or test at all.
 .PHONY: generate-version
 generate-version:  ## Regenerate version_gen.go from VERSION and the git state
-	go run github.com/lczyk/version/go/cmd/generate-version -out version_gen.go -pkg main -init
+	@go run github.com/lczyk/version/go/cmd/generate-version -out version_gen.go -pkg main -init \
+		|| echo "couldn't stamp a version (not a git checkout?) -- carrying on unstamped"
 
 .PHONY: install
 install: ./bin/asciiscript  ## Symlink the binary into ~/.local/bin
