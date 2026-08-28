@@ -39,12 +39,14 @@ $ asciiscript demo.sh demo.cast
 $ asciinema play demo.cast
 ```
 
-Two control commands, both in milliseconds:
+Three control commands:
 
-- `#$ delay N` -- time between keypresses (typing speed). Default 40.
-- `#$ wait N` -- pause after a command finishes, before the next one is typed. Default 100.
-  It's breathing room, not a runtime guess: waiting for the command itself is automatic
-  (see [Waiting](#waiting)).
+- `#$ delay N` -- time between keypresses (typing speed), in ms. Default 40.
+- `#$ wait N` -- pause after a command finishes, before the next one is typed, in ms.
+  Default 100. It's breathing room, not a runtime guess: waiting for the command itself is
+  automatic (see [Waiting](#waiting)).
+- `#$ handover` -- give the next command to whoever is running the recording. Takes no
+  argument (see [Handover](#handover)).
 
 Scripts run in a clean `bash` -- a minimal coloured prompt from a throwaway rcfile, no user
 dotfiles, macOS deprecation banner silenced -- so demos come out consistent. Write the script
@@ -87,12 +89,44 @@ and lines continued with a trailing `\` wait like anything else.
 The exception is a command that never returns to a prompt by itself -- an editor, a pager,
 `ssh`, anything reading stdin. There's nothing to wait for: the keystrokes that would end it
 are the ones being held back. Those run out `--cmd-timeout` (10 minutes by default), print a
-warning naming the command, and get typed over anyway. If your script has one, record with
-`--no-sync` and go back to sizing `#$ wait` by hand:
+warning naming the command, and get typed over anyway. Hand those over (below), or record
+with `--no-sync` and go back to sizing `#$ wait` by hand:
 
 ```sh
 $ asciiscript --no-sync editing-demo.sh demo.cast
 ```
+
+## Handover
+
+`#$ handover` gives the next command to you. It's typed as usual, and then your keyboard is
+wired to the recorded session until that command drops the shell back at a prompt -- at
+which point the script picks up again on its own. What you did is in the recording, typed by
+hand and indistinguishable from the rest.
+
+```sh
+#$ handover
+nano config.yaml
+```
+
+That's the answer for the commands nothing can drive for you: editors, `ssh`, a REPL,
+anything waiting on a keypress. There's no deadline on a handover -- `--cmd-timeout` doesn't
+apply, because it's waiting on a person.
+
+Your terminal goes into raw mode for the duration, so ctrl-o, ctrl-c, arrows and the rest
+reach the command rather than being buffered into lines or turned into signals. Which also
+means ctrl-c won't stop asciiscript while a handover is live: quit the command first.
+
+Three things a handover needs, all checked before the take starts:
+
+- not `--quiet` -- you can't drive what you can't see
+- not `--no-sync` -- the prompt is what tells asciiscript you're done
+- a real terminal on stdin
+
+Worth knowing: `--seed` no longer pins a take once a person is in it, and if `--cols`/`--rows`
+don't match your actual terminal, the handed-over command draws itself to the recording's
+size rather than yours. asciiscript warns when they differ.
+
+[`examples/handover.sh`](examples/handover.sh) is a two-minute one to try.
 
 ## Jitter
 

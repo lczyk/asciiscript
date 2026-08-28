@@ -10,6 +10,9 @@ $ asciinema play hello.cast
 - **`hello.sh`** -- the README demo. The smallest thing that shows both control commands.
 - **`pacing.sh`** -- `#$ delay` and `#$ wait` in anger: fast lines, slow lines, and giving
   output room to breathe.
+- **`handover.sh`** -- `#$ handover` in practice: the script sets a file up, hands you the
+  editor to change one line, and carries on once you quit. Needs a real terminal, so run it
+  yourself rather than from a pipe.
 - **`git.sh`** -- a full workflow (init, edit, commit, log) run in a scratch directory under
   `/tmp` that the script clears out first, so takes are repeatable. Its one `export` line is
   doing real work: `GIT_PAGER=cat` stops `git log` and `git diff` opening `less` and hanging,
@@ -36,8 +39,8 @@ $ asciiscript --seed 12345 examples/git.sh out.cast      # reproduce a take you 
   types. Waiting can't help here -- the keystrokes that would dismiss the pager are the ones
   being held back -- so the line burns `--cmd-timeout`, warns, and the run then fails on
   `--timeout` instead of finishing. Set `PAGER=cat` (or `GIT_PAGER=cat`, or pass `--no-pager`).
-  Same for editors and anything else reading stdin: if a script genuinely needs one, record it
-  with `--no-sync` and size every `#$ wait` by hand.
+  When the demo genuinely wants one -- an editor, a REPL -- put `#$ handover` in front of it
+  and drive it yourself; see `handover.sh`.
 - **Mind the `!`.** The recorded shell is interactive, so history expansion is on and
   `echo "done!"` dies with `bash: !": event not found`. Single-quote the string, or start the
   script with `set +H`.
