@@ -41,6 +41,17 @@ clean:  ## Remove build artifacts
 test: generate-version  ## Run the test suite with the race detector
 	go test -race ./...
 
+# go test takes one -fuzz target at a time, hence the loop. Not part of verify:
+# it explores rather than gates, and the seed corpora already run under `test`.
+FUZZTIME ?= 20s
+
+.PHONY: fuzz
+fuzz: generate-version  ## Fuzz each target in turn (narrow via FUZZTIME=1m)
+	@for t in $$(go test -list '^Fuzz' . | grep '^Fuzz'); do \
+		echo "==> $$t ($(FUZZTIME))"; \
+		go test -run '^$$' -fuzz "^$$t$$" -fuzztime $(FUZZTIME) . || exit 1; \
+	done
+
 .PHONY: lint
 lint: generate-version  ## go vet + gofmt check (no writes)
 	go vet ./...

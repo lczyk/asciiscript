@@ -368,11 +368,17 @@ func newPromptMarker() (promptMarker, error) {
 	if _, err := rand.Read(b); err != nil {
 		return promptMarker{}, fmt.Errorf("couldn't generate a prompt marker: %w", err)
 	}
-	probe := "asciiscript=" + hex.EncodeToString(b)
+	return promptMarkerFor(hex.EncodeToString(b)), nil
+}
+
+// promptMarkerFor builds the marker for a given token. Split out from
+// newPromptMarker so tests get a marker they can write into their inputs.
+func promptMarkerFor(token string) promptMarker {
+	probe := "asciiscript=" + token
 	return promptMarker{
 		probe: probe,
 		strip: regexp.MustCompile(`\x1b\]133;D;[0-9]*;` + regexp.QuoteMeta(probe) + `\x07`),
-	}, nil
+	}
 }
 
 // prefix is the marker as a bash prompt fragment. \[ \] keeps it out of
