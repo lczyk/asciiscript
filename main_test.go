@@ -135,6 +135,21 @@ func newRecordedScript(t *testing.T, delay time.Duration) (*Script, *recorder) {
 	return s, rec
 }
 
+// newScriptFrom is newRecordedScript for a script with actual content, typing
+// at zero delay so the recorded events are the structure and nothing else.
+func newScriptFrom(t *testing.T, text string) (*Script, *recorder) {
+	t.Helper()
+	s, err := parseScript(text)
+	assert.NoError(t, err)
+	rec := &recorder{}
+	s.Delay = 0
+	s.pty = rec
+	s.sleep = rec.sleep
+	s.jitter = newJitter(0, 1)
+	s.warn = &bytes.Buffer{}
+	return s, rec
+}
+
 // warnings is everything the script has reported to the user, the recorded
 // session untouched.
 func warnings(s *Script) string { return s.warn.(*bytes.Buffer).String() }
@@ -681,4 +696,123 @@ func (s *syncWriter) await(t *testing.T, want string) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("keyboard input never arrived: want %q, got %q", want, s.String())
+}
+
+func TestTermSizeUsesWhatWasAskedFor(t *testing.T) {
+	cols, rows := termSize(&Options{Cols: 100, Rows: 30})
+	assert.Equal(t, cols, uint16(100))
+	assert.Equal(t, rows, uint16(30))
+}
+
+// A dimension left at zero gets filled in from somewhere -- the real terminal,
+// or 80x24 when there isn't one -- without disturbing the one that was given.
+func TestTermSizeFillsInWhatWasNot(t *testing.T) {
+	cols, rows := termSize(&Options{Cols: 100})
+	assert.Equal(t, cols, uint16(100))
+	assert.That(t, rows > 0, "rows should be filled in")
+
+	cols, rows = termSize(&Options{Rows: 30})
+	assert.Equal(t, rows, uint16(30))
+	assert.That(t, cols > 0, "cols should be filled in")
+
+	cols, rows = termSize(&Options{})
+	assert.That(t, cols > 0 && rows > 0, "both should be filled in")
+}
+
+// `#$ delay` and `#$ wait` are only worth anything if they reach the typing, so
+// check the gaps a script asks for are the gaps that come out.
+func TestControlCommandsChangeTheTiming(t *testing.T) {
+	s, err := parseScript("#$ delay 70\n#$ wait 250\nab\n")
+	assert.NoError(t, err)
+
+	rec := &recorder{}
+	s.pty = rec
+	s.sleep = rec.sleep
+	s.jitter = newJitter(0, 1) // no jitter: every pause is exactly the delay
+	s.warn = &bytes.Buffer{}
+	s.mon.head = []byte("ab")
+
+	assert.NoError(t, s.typeAll(0))
+	assert.Equal(t, s.Delay, 70*time.Millisecond)
+	assert.Equal(t, s.Wait, 250*time.Millisecond)
+	assert.EqualArrays(t, rec.events, []string{
+		"s:0s", // the settle
+		"s:70ms", "w:a",
+		"s:70ms", "w:b",
+		"s:70ms", "w:\n",
+		"s:250ms", // the wait, after the line
+	})
+}
+
+// A pause belongs to the line it precedes, so `#$ wait N` slows down the line
+// written under it -- not the one after that. Control lines cost nothing
+// themselves: they are notes to asciiscript, never typed at the shell.
+func TestWaitAppliesToTheLineThatFollowsIt(t *testing.T) {
+	s, rec := newScriptFrom(t, "a\n#$ wait 500\nb\n")
+	s.mon.head = []byte("a")
+
+	assert.NoError(t, s.typeAll(0))
+	assert.EqualArrays(t, rec.events, []string{
+		"s:0s",                        // the settle
+		"s:0s", "w:a", "s:0s", "w:\n", // first line: nothing to pause after yet
+		"s:500ms",                     // the gap #$ wait asked for, before b
+		"s:0s", "w:b", "s:0s", "w:\n", // and no pause charged for the control line
+		"s:500ms", // a last beat before `exit` lands
+	})
+}
+
+// The wait has to actually wait. Handing it a mark that is already there (as
+// the cheaper tests do) can't tell a working wait from one that never runs, so
+// this one makes the prompt arrive late, from another goroutine.
+func TestSyncPromptPollsUntilThePromptArrives(t *testing.T) {
+	s, _ := newRecordedScript(t, 0)
+	s.syncFor = 5 * time.Second
+	s.sleep = s.wait // real sleeps: the polling is the thing under test
+
+	const late = 60 * time.Millisecond
+	go func() {
+		time.Sleep(late)
+		s.mon.mu.Lock()
+		s.mon.marks = 1
+		s.mon.mu.Unlock()
+	}()
+
+	start := time.Now()
+	assert.NoError(t, s.syncPrompt("sleep 1\n", 0))
+	took := time.Since(start)
+
+	assert.That(t, took >= late, "should have waited for the prompt to come back")
+	assert.That(t, took < time.Second, "should have carried on as soon as it did, not run out the timeout")
+	assert.Equal(t, warnings(s), "")
+}
+
+// The same thing one level up, which is what a script actually relies on: the
+// second line must not reach the pty until the first line's prompt is back.
+func TestTypeAllHoldsTheNextLineUntilThePromptComesBack(t *testing.T) {
+	s, rec := newRecordedScript(t, 0)
+	s.Commands = []Command{NewShell("first"), NewShell("second")}
+	s.Wait = 0
+	s.syncFor = 5 * time.Second
+	s.sleep = s.wait
+	s.mon.head = []byte("first")
+
+	// Each line's prompt comes back a while after it was typed, never during.
+	const runtime = 50 * time.Millisecond
+	rec.onWrite = func(p string) {
+		if p != "\n" {
+			return
+		}
+		go func() {
+			time.Sleep(runtime)
+			s.mon.mu.Lock()
+			s.mon.marks++
+			s.mon.mu.Unlock()
+		}()
+	}
+
+	start := time.Now()
+	assert.NoError(t, s.typeAll(0))
+
+	assert.That(t, time.Since(start) >= 2*runtime, "both lines should have waited on their own prompt")
+	assert.EqualArrays(t, typedLines(rec), []string{"first\n", "second\n"})
 }

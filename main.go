@@ -616,11 +616,11 @@ func (s *Script) syncPrompt(line string, before int) error {
 // on the terminal can't be called off, so anything else would leave a keystroke
 // stranded in a goroutine, to surface at whatever moment it eventually returns.
 type keyboard struct {
-	in      io.Reader
-	started bool
+	in io.Reader
 
-	mu sync.Mutex
-	to io.Writer // where input goes, nil between handovers
+	mu      sync.Mutex
+	started bool
+	to      io.Writer // where input goes, nil between handovers
 }
 
 func (k *keyboard) pump() {
@@ -642,13 +642,14 @@ func (k *keyboard) pump() {
 
 // lend routes the keyboard to w until the returned func takes it back.
 func (k *keyboard) lend(w io.Writer) func() {
-	if !k.started {
-		k.started = true
-		go k.pump()
-	}
 	k.mu.Lock()
+	first := !k.started
+	k.started = true
 	k.to = w
 	k.mu.Unlock()
+	if first {
+		go k.pump()
+	}
 	return func() {
 		k.mu.Lock()
 		k.to = nil
@@ -730,38 +731,53 @@ func (s *Script) typeAll(settle time.Duration) error {
 	if err := s.sleep(settle); err != nil {
 		return err
 	}
-	checked := false
+	typed := false
 	for _, c := range s.Commands {
 		sh, typing := c.(Shell)
-		var before int
-		if typing {
-			before = s.mon.marked()
+
+		// A control line is a note to asciiscript, not something the recorded
+		// shell ever sees: it is never typed and never finishes, so it earns
+		// no pause of its own. Because the pause belongs to the line it
+		// precedes, `#$ wait N` takes effect on the very next line -- which is
+		// where a script puts it to slow something down.
+		if !typing {
+			if err := c.Run(s); err != nil {
+				return err
+			}
+			continue
 		}
+		if typed {
+			if err := s.sleep(s.Wait); err != nil {
+				return err
+			}
+		}
+
+		before := s.mon.marked()
 		if err := c.Run(s); err != nil {
 			return err
 		}
-		if typing && !checked {
-			checked = true
+		if !typed {
+			typed = true
 			if err := s.confirmEcho(sh.Cmd, settle); err != nil {
 				return err
 			}
 		}
-		if typing {
-			var err error
-			switch {
-			case s.handover:
-				s.handover = false
-				err = s.handOver(before)
-			case s.syncFor > 0:
-				err = s.syncPrompt(sh.Cmd, before)
-			}
-			if err != nil {
-				return err
-			}
+
+		var err error
+		switch {
+		case s.handover:
+			s.handover = false
+			err = s.handOver(before)
+		case s.syncFor > 0:
+			err = s.syncPrompt(sh.Cmd, before)
 		}
-		if err := s.sleep(s.Wait); err != nil {
+		if err != nil {
 			return err
 		}
+	}
+	// One last pause, so the closing output gets a beat before `exit` lands.
+	if typed {
+		return s.sleep(s.Wait)
 	}
 	return nil
 }
