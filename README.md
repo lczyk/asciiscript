@@ -70,6 +70,7 @@ gotchas worth knowing before you write your own.
     --no-sync  type the next command without waiting for the previous one to finish
     --cmd-timeout
                ms a command gets to finish before typing carries on (default 600000)
+-v, --version  print the version and exit
 ```
 
 ```sh
@@ -170,3 +171,6 @@ $ asciiscript --seed 12345 demo.sh demo.cast       # reproduce a specific take
   `--timeout` to stop and is killed after that.
 - `Ctrl-C` stops the recording rather than abandoning it: asciinema is told to stop so it can
   flush what it has, and the temporary rcfile is cleaned up.
+- The `VERSION` file is the source of truth for the version. `make` stamps it into the binary
+  along with the commit and build date, so `--version` reports what a build actually came
+  from; a build that skips `make generate-version` reports `0.0.0-dev`.
