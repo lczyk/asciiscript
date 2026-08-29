@@ -37,7 +37,6 @@ type Options struct {
 	Cols   int     `long:"cols" description:"terminal width in columns (default: current terminal)"`
 	Rows   int     `long:"rows" description:"terminal height in rows (default: current terminal)"`
 	Settle int     `long:"settle" default:"2000" description:"ms to wait for asciinema to warm up before typing"`
-	Wait   int     `long:"wait" default:"100" description:"ms to pause after each command finishes (#$ wait overrides per section)"`
 	Speed  float64 `long:"speed" default:"1.0" description:"typing speed multiplier (2 = twice as fast; scales #$ delay)"`
 	Quiet  bool    `short:"q" long:"quiet" description:"do not echo the recorded session to this terminal"`
 	Jitter float64 `long:"jitter" default:"1.0" description:"human-jitter scale (1 = human-like, 0 = uniform/off)"`
@@ -808,10 +807,6 @@ func finish(cmd *exec.Cmd, w io.Writer, timeout time.Duration) error {
 // injecting keystrokes into it. asciinema sees a real terminal, so it runs
 // interactively and forwards our keystrokes to the shell it records.
 func (s *Script) Run(o *Options) error {
-	// the flag sets the starting inter-command wait; `#$ wait` overrides it per
-	// section as the script runs.
-	s.Wait = time.Duration(o.Wait) * time.Millisecond
-
 	if o.Speed <= 0 {
 		return fmt.Errorf("--speed must be greater than 0 (got %g)", o.Speed)
 	}

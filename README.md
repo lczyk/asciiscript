@@ -62,7 +62,6 @@ gotchas worth knowing before you write your own.
     --cols     terminal width in columns (default: current terminal, else 80)
     --rows     terminal height in rows (default: current terminal, else 24)
     --settle   ms to wait for asciinema to warm up before typing (default 2000)
-    --wait     ms to pause after each command finishes (default 100; #$ wait overrides)
     --speed    typing speed multiplier (default 1; 2 = twice as fast, scales #$ delay)
 -q, --quiet    don't mirror the recorded session to this terminal
     --jitter   human-jitter scale (default 1; 0 = uniform/off, see below)
