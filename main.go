@@ -2,12 +2,11 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -173,8 +172,11 @@ func (h Handover) Run(s *Script) error {
 
 // NewCtrl parses a control command (the text after the "#$" prefix).
 func NewCtrl(cmd string) (Command, error) {
-	tokens := strings.Split(cmd, " ")
-	switch strings.TrimSpace(tokens[0]) {
+	tokens := strings.Fields(cmd)
+	if len(tokens) == 0 {
+		return nil, ErrUnknownCtrl
+	}
+	switch tokens[0] {
 	case "delay":
 		return NewDelay(tokens[1:])
 	case "wait":
@@ -198,10 +200,10 @@ type Script struct {
 	mon    *mirror         // asciinema's output, watched for our own keystrokes
 	done   <-chan struct{} // closed on SIGINT/SIGTERM
 
-	// syncFor is how long a typed line gets to finish before typing carries on
-	// anyway.
-	syncFor time.Duration
-	warn    io.Writer // where warnings go; never the pty, which is being recorded
+	// cmdTimeout is how long a typed line gets to finish before typing carries
+	// on anyway.
+	cmdTimeout time.Duration
+	warn       io.Writer // where warnings go; never the pty, which is being recorded
 
 	keys     *keyboard // the real terminal's input, on loan during a handover
 	handover bool      // armed by `#$ handover`, spent by the next line typed
@@ -363,12 +365,8 @@ type promptMarker struct {
 	strip *regexp.Regexp // the whole sequence, for keeping the live echo clean
 }
 
-func newPromptMarker() (promptMarker, error) {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		return promptMarker{}, fmt.Errorf("couldn't generate a prompt marker: %w", err)
-	}
-	return promptMarkerFor(hex.EncodeToString(b)), nil
+func newPromptMarker() promptMarker {
+	return promptMarkerFor(fmt.Sprintf("%016x", rand.Uint64()))
 }
 
 // promptMarkerFor builds the marker for a given token. Split out from
@@ -589,12 +587,12 @@ func (s *Script) confirmEcho(line string, settle time.Duration) error {
 // would end it is the input being held back. Those run the timeout out, say so,
 // and get typed over anyway.
 func (s *Script) syncPrompt(line string, before int) error {
-	deadline := time.Now().Add(s.syncFor)
+	deadline := time.Now().Add(s.cmdTimeout)
 	for s.mon.marked() <= before {
 		if time.Now().After(deadline) {
 			fmt.Fprintf(s.warn,
 				"asciiscript: %q hasn't finished after %s -- typing on regardless; if it holds the terminal (an editor, a pager) put `#$ handover` in front of it\n",
-				strings.TrimSuffix(line, "\n"), s.syncFor)
+				strings.TrimSuffix(line, "\n"), s.cmdTimeout)
 			return nil
 		}
 		if err := s.sleep(syncPoll); err != nil {
@@ -831,7 +829,8 @@ func (s *Script) Run(o *Options) error {
 	if o.ExitTimeout <= 0 {
 		return fmt.Errorf("--exit-timeout must be greater than 0 (got %d)", o.ExitTimeout)
 	}
-	if err := checkHandover(s.hasHandover(), o); err != nil {
+	handover := s.hasHandover()
+	if err := checkHandover(handover, o); err != nil {
 		return err
 	}
 	seed := time.Now().UnixNano()
@@ -862,11 +861,8 @@ func (s *Script) Run(o *Options) error {
 	}()
 	s.done = done
 
-	marker, err := newPromptMarker()
-	if err != nil {
-		return err
-	}
-	s.syncFor = time.Duration(o.CmdTimeout) * time.Millisecond
+	marker := newPromptMarker()
+	s.cmdTimeout = time.Duration(o.CmdTimeout) * time.Millisecond
 	s.mon.mark = marker
 
 	shellCmd, cleanup, err := bashCommand(marker)
@@ -884,7 +880,7 @@ func (s *Script) Run(o *Options) error {
 	)
 
 	cols, rows := termSize(o)
-	if s.hasHandover() {
+	if handover {
 		if ws, err := pty.GetsizeFull(os.Stdin); err == nil && (ws.Cols != cols || ws.Rows != rows) {
 			fmt.Fprintf(s.warn, "asciiscript: recording at %dx%d but this terminal is %dx%d -- a handed-over command will draw itself to the wrong size\n", cols, rows, ws.Cols, ws.Rows)
 		}

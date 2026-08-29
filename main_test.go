@@ -56,6 +56,15 @@ func TestNewShellAppendsNewline(t *testing.T) {
 	assert.Equal(t, NewShell("echo hi\n").Cmd, "echo hi\n")
 }
 
+// A control line is words, however they are spaced: a second space or a tab
+// before the number is not a missing argument.
+func TestParseScriptCtrlLooseSpacing(t *testing.T) {
+	s, err := parseScript("#$  delay \t 100  \n#$wait 5")
+	assert.NoError(t, err)
+	assert.Equal(t, assert.Type[Delay](t, s.Commands[0]).Interval, 100*time.Millisecond)
+	assert.Equal(t, assert.Type[Wait](t, s.Commands[1]).Duration, 5*time.Millisecond)
+}
+
 func TestParseScriptUnknownCtrl(t *testing.T) {
 	_, err := parseScript("#$ bogus 1")
 	assert.ErrorIs(t, err, ErrUnknownCtrl)
@@ -327,10 +336,7 @@ func TestParseScriptIgnoresQuotedHeredocMarker(t *testing.T) {
 }
 
 func TestPromptMarkerIsUniquePerRun(t *testing.T) {
-	a, err := newPromptMarker()
-	assert.NoError(t, err)
-	b, err := newPromptMarker()
-	assert.NoError(t, err)
+	a, b := newPromptMarker(), newPromptMarker()
 
 	assert.ContainsString(t, a.probe, "asciiscript=")
 	assert.That(t, a.probe != b.probe, "each run should get its own marker")
@@ -339,8 +345,7 @@ func TestPromptMarkerIsUniquePerRun(t *testing.T) {
 // The marker rides in the prompt, so it has to sit inside \[ \] -- bash counts
 // anything outside those towards the prompt's width and wraps the line early.
 func TestPromptMarkerPrefixIsZeroWidth(t *testing.T) {
-	m, err := newPromptMarker()
-	assert.NoError(t, err)
+	m := newPromptMarker()
 
 	prefix := m.prefix()
 	assert.That(t, strings.HasPrefix(prefix, `\[`), `prefix should open with \[`)
@@ -352,8 +357,7 @@ func TestPromptMarkerPrefixIsZeroWidth(t *testing.T) {
 // Continuation lines sit at PS2, so it needs the marker too -- otherwise every
 // heredoc body line and every trailing backslash waits out the whole timeout.
 func TestBashRCMarksBothPrompts(t *testing.T) {
-	m, err := newPromptMarker()
-	assert.NoError(t, err)
+	m := newPromptMarker()
 
 	rc := bashRC(m)
 	assert.ContainsString(t, rc, "PS1='"+m.prefix())
@@ -368,8 +372,7 @@ func emitted(m promptMarker, status int) string {
 
 func newMarkedMirror(t *testing.T) (*mirror, promptMarker) {
 	t.Helper()
-	m, err := newPromptMarker()
-	assert.NoError(t, err)
+	m := newPromptMarker()
 	return &mirror{quiet: true, mark: m}, m
 }
 
@@ -399,8 +402,7 @@ func TestMirrorCountsEachMarkerOnce(t *testing.T) {
 // markers; they must not read as prompts of this one.
 func TestMirrorIgnoresAnotherRunsMarker(t *testing.T) {
 	mon, _ := newMarkedMirror(t)
-	theirs, err := newPromptMarker()
-	assert.NoError(t, err)
+	theirs := newPromptMarker()
 
 	mon.run(strings.NewReader(emitted(theirs, 0)))
 	assert.Equal(t, mon.marked(), 0)
@@ -420,7 +422,7 @@ func TestMirrorCleanLeavesOrdinaryOutput(t *testing.T) {
 
 func TestSyncPromptReturnsOnANewPrompt(t *testing.T) {
 	s, _ := newRecordedScript(t, 0)
-	s.syncFor = time.Minute
+	s.cmdTimeout = time.Minute
 	s.mon.marks = 4
 
 	assert.NoError(t, s.syncPrompt("sleep 1\n", 3))
@@ -431,7 +433,7 @@ func TestSyncPromptReturnsOnANewPrompt(t *testing.T) {
 // Counting it would make every wait a no-op and the whole feature silent.
 func TestSyncPromptWaitsPastThePromptItStartedFrom(t *testing.T) {
 	s, _ := newRecordedScript(t, 0)
-	s.syncFor = 20 * time.Millisecond
+	s.cmdTimeout = 20 * time.Millisecond
 	s.mon.marks = 3
 
 	assert.NoError(t, s.syncPrompt("nano f\n", 3))
@@ -442,7 +444,7 @@ func TestSyncPromptWaitsPastThePromptItStartedFrom(t *testing.T) {
 // regardless is the old behaviour; the warning is what makes it diagnosable.
 func TestSyncPromptWarnsAndCarriesOnAtTheTimeout(t *testing.T) {
 	s, _ := newRecordedScript(t, 0)
-	s.syncFor = 20 * time.Millisecond
+	s.cmdTimeout = 20 * time.Millisecond
 
 	assert.NoError(t, s.syncPrompt("nano rockcraft.yaml\n", 0))
 
@@ -454,7 +456,7 @@ func TestSyncPromptWarnsAndCarriesOnAtTheTimeout(t *testing.T) {
 
 func TestSyncPromptStopsWhenInterrupted(t *testing.T) {
 	s, _ := newRecordedScript(t, 0)
-	s.syncFor = time.Minute
+	s.cmdTimeout = time.Minute
 	done := make(chan struct{})
 	close(done)
 	s.done = done
@@ -468,7 +470,7 @@ func TestTypeAllWaitsForEachCommand(t *testing.T) {
 	s, rec := newRecordedScript(t, 0)
 	s.Commands = []Command{NewShell("a"), NewShell("b")}
 	s.Wait = 0
-	s.syncFor = time.Minute
+	s.cmdTimeout = time.Minute
 	s.mon.head = []byte("a") // stands in for the echo confirmEcho looks for
 
 	// One prompt per line, and only once that line has been typed in full.
@@ -491,7 +493,7 @@ func TestTypeAllTypesOnAfterTheTimeout(t *testing.T) {
 	s, rec := newRecordedScript(t, 0)
 	s.Commands = []Command{NewShell("nano f"), NewShell("b")}
 	s.Wait = 0
-	s.syncFor = time.Millisecond
+	s.cmdTimeout = time.Millisecond
 	s.mon.head = []byte("nano f")
 
 	assert.NoError(t, s.typeAll(0))
@@ -617,7 +619,7 @@ func TestTypeAllHandsOverOnlyTheArmedLine(t *testing.T) {
 	s, rec := newRecordedScript(t, 0)
 	s.Commands = []Command{Handover{}, NewShell("nano f"), NewShell("echo after")}
 	s.Wait = 0
-	s.syncFor = time.Minute
+	s.cmdTimeout = time.Minute
 	s.mon.head = []byte("nano f")
 
 	lent := 0
@@ -737,7 +739,7 @@ func TestWaitAppliesToTheLineThatFollowsIt(t *testing.T) {
 // this one makes the prompt arrive late, from another goroutine.
 func TestSyncPromptPollsUntilThePromptArrives(t *testing.T) {
 	s, _ := newRecordedScript(t, 0)
-	s.syncFor = 5 * time.Second
+	s.cmdTimeout = 5 * time.Second
 	s.sleep = s.wait // real sleeps: the polling is the thing under test
 
 	const late = 60 * time.Millisecond
@@ -763,7 +765,7 @@ func TestTypeAllHoldsTheNextLineUntilThePromptComesBack(t *testing.T) {
 	s, rec := newRecordedScript(t, 0)
 	s.Commands = []Command{NewShell("first"), NewShell("second")}
 	s.Wait = 0
-	s.syncFor = 5 * time.Second
+	s.cmdTimeout = 5 * time.Second
 	s.sleep = s.wait
 	s.mon.head = []byte("first")
 
