@@ -19,41 +19,41 @@ import (
 func TestParseScriptCommands(t *testing.T) {
 	s, err := parseScript("echo hi\n#$ delay 100\n#$ wait 250\necho bye")
 	assert.NoError(t, err)
-	assert.Len(t, s.Commands, 4)
+	assert.Len(t, s.commands, 4)
 
-	sh, ok := s.Commands[0].(Shell)
-	assert.That(t, ok, "command 0 should be a Shell")
-	assert.Equal(t, sh.Cmd, "echo hi\n")
+	sh, ok := s.commands[0].(shell)
+	assert.That(t, ok, "command 0 should be a shell")
+	assert.Equal(t, sh.cmd, "echo hi\n")
 
-	d, ok := s.Commands[1].(Delay)
-	assert.That(t, ok, "command 1 should be a Delay")
-	assert.Equal(t, d.Interval, 100*time.Millisecond)
+	d, ok := s.commands[1].(setDelay)
+	assert.That(t, ok, "command 1 should be a setDelay")
+	assert.Equal(t, d.d, 100*time.Millisecond)
 
-	w, ok := s.Commands[2].(Wait)
-	assert.That(t, ok, "command 2 should be a Wait")
-	assert.Equal(t, w.Duration, 250*time.Millisecond)
+	w, ok := s.commands[2].(setWait)
+	assert.That(t, ok, "command 2 should be a setWait")
+	assert.Equal(t, w.d, 250*time.Millisecond)
 
-	sh2, ok := s.Commands[3].(Shell)
-	assert.That(t, ok, "command 3 should be a Shell")
-	assert.Equal(t, sh2.Cmd, "echo bye\n")
+	sh2, ok := s.commands[3].(shell)
+	assert.That(t, ok, "command 3 should be a shell")
+	assert.Equal(t, sh2.cmd, "echo bye\n")
 }
 
 func TestParseScriptDefaults(t *testing.T) {
 	s, err := parseScript("echo hi")
 	assert.NoError(t, err)
-	assert.Equal(t, s.Delay, 40*time.Millisecond)
-	assert.Equal(t, s.Wait, 100*time.Millisecond)
+	assert.Equal(t, s.delay, 40*time.Millisecond)
+	assert.Equal(t, s.wait, 100*time.Millisecond)
 }
 
 func TestParseScriptSkipsBlankLines(t *testing.T) {
 	s, err := parseScript("echo a\n\n\necho b\n")
 	assert.NoError(t, err)
-	assert.Len(t, s.Commands, 2)
+	assert.Len(t, s.commands, 2)
 }
 
 func TestNewShellAppendsNewline(t *testing.T) {
-	assert.Equal(t, NewShell("echo hi").Cmd, "echo hi\n")
-	assert.Equal(t, NewShell("echo hi\n").Cmd, "echo hi\n")
+	assert.Equal(t, newShell("echo hi").cmd, "echo hi\n")
+	assert.Equal(t, newShell("echo hi\n").cmd, "echo hi\n")
 }
 
 // A control line is words, however they are spaced: a second space or a tab
@@ -61,23 +61,23 @@ func TestNewShellAppendsNewline(t *testing.T) {
 func TestParseScriptCtrlLooseSpacing(t *testing.T) {
 	s, err := parseScript("#$  delay \t 100  \n#$wait 5")
 	assert.NoError(t, err)
-	assert.Equal(t, assert.Type[Delay](t, s.Commands[0]).Interval, 100*time.Millisecond)
-	assert.Equal(t, assert.Type[Wait](t, s.Commands[1]).Duration, 5*time.Millisecond)
+	assert.Equal(t, assert.Type[setDelay](t, s.commands[0]).d, 100*time.Millisecond)
+	assert.Equal(t, assert.Type[setWait](t, s.commands[1]).d, 5*time.Millisecond)
 }
 
 func TestParseScriptUnknownCtrl(t *testing.T) {
 	_, err := parseScript("#$ bogus 1")
-	assert.ErrorIs(t, err, ErrUnknownCtrl)
+	assert.ErrorIs(t, err, errUnknownCtrl)
 }
 
 func TestParseScriptCtrlNoArgs(t *testing.T) {
 	_, err := parseScript("#$ delay")
-	assert.ErrorIs(t, err, ErrNoArgs)
+	assert.ErrorIs(t, err, errNoArgs)
 }
 
 func TestParseScriptCtrlBadArg(t *testing.T) {
 	_, err := parseScript("#$ wait abc")
-	assert.ErrorIs(t, err, ErrBadArg)
+	assert.ErrorIs(t, err, errBadArg)
 }
 
 func TestBashCommand(t *testing.T) {
@@ -105,7 +105,7 @@ func TestStripQueriesNoQuery(t *testing.T) {
 	assert.Equal(t, string(stripQueries([]byte("plain text\r\n"))), "plain text\r\n")
 }
 
-// recorder stands in for the pty and the clock, so a Shell.Run can be replayed
+// recorder stands in for the pty and the clock, so a shell.Run can be replayed
 // without a terminal and its keystroke/pause interleaving inspected.
 type recorder struct {
 	events  []string
@@ -131,12 +131,12 @@ func (r *recorder) sleep(d time.Duration) error {
 	return nil
 }
 
-func newRecordedScript(t *testing.T, delay time.Duration) (*Script, *recorder) {
+func newRecordedScript(t *testing.T, delay time.Duration) (*script, *recorder) {
 	t.Helper()
 	s, err := parseScript("")
 	assert.NoError(t, err)
 	rec := &recorder{}
-	s.Delay = delay
+	s.delay = delay
 	s.pty = rec
 	s.sleep = rec.sleep
 	s.jitter = newJitter(1, 7)
@@ -146,12 +146,12 @@ func newRecordedScript(t *testing.T, delay time.Duration) (*Script, *recorder) {
 
 // newScriptFrom is newRecordedScript for a script with actual content, typing
 // at zero delay so the recorded events are the structure and nothing else.
-func newScriptFrom(t *testing.T, text string) (*Script, *recorder) {
+func newScriptFrom(t *testing.T, text string) (*script, *recorder) {
 	t.Helper()
 	s, err := parseScript(text)
 	assert.NoError(t, err)
 	rec := &recorder{}
-	s.Delay = 0
+	s.delay = 0
 	s.pty = rec
 	s.sleep = rec.sleep
 	s.jitter = newJitter(0, 1)
@@ -161,7 +161,7 @@ func newScriptFrom(t *testing.T, text string) (*Script, *recorder) {
 
 // warnings is everything the script has reported to the user, the recorded
 // session untouched.
-func warnings(s *Script) string { return s.warn.(*bytes.Buffer).String() }
+func warnings(s *script) string { return s.warn.(*bytes.Buffer).String() }
 
 // typedLines reassembles the keystrokes a recorder saw into whole lines, so a
 // test can assert on what was typed without minding the per-key writes.
@@ -179,14 +179,14 @@ func typedLines(r *recorder) []string {
 	return lines
 }
 
-// Each pause belongs to the gap *before* its keystroke, so Shell.Run must wait
+// Each pause belongs to the gap *before* its keystroke, so shell.Run must wait
 // it out and only then write. Typing first would shift every digraph and
 // word-boundary pause one key late.
 func TestShellRunWaitsBeforeEachKeystroke(t *testing.T) {
 	s, rec := newRecordedScript(t, 40*time.Millisecond)
 	plan := newJitter(1, 7).plan("ab\n", 40*time.Millisecond)
 
-	assert.NoError(t, NewShell("ab").Run(s))
+	assert.NoError(t, newShell("ab").run(s))
 
 	assert.EqualArrays(t, rec.events, []string{
 		"s:" + plan[0].pause.String(), "w:a",
@@ -199,7 +199,7 @@ func TestShellRunReturnsWriteError(t *testing.T) {
 	s, rec := newRecordedScript(t, 0)
 	rec.err = errors.New("pty is gone")
 
-	err := NewShell("echo hi").Run(s)
+	err := newShell("echo hi").run(s)
 	assert.Error(t, err, "writing to pty failed")
 }
 
@@ -209,9 +209,9 @@ func TestShellRunStopsWhenInterrupted(t *testing.T) {
 	done := make(chan struct{})
 	close(done)
 	s.done = done
-	s.sleep = s.wait
+	s.sleep = s.realSleep
 
-	assert.ErrorIs(t, NewShell("echo hi").Run(s), ErrInterrupted)
+	assert.ErrorIs(t, newShell("echo hi").run(s), errInterrupted)
 }
 
 func TestScriptWaitInterrupted(t *testing.T) {
@@ -221,9 +221,9 @@ func TestScriptWaitInterrupted(t *testing.T) {
 	close(done)
 	s.done = done
 
-	assert.ErrorIs(t, s.wait(time.Hour), ErrInterrupted)
-	assert.ErrorIs(t, s.wait(0), ErrInterrupted)
-	assert.NoError(t, (&Script{}).wait(0))
+	assert.ErrorIs(t, s.realSleep(time.Hour), errInterrupted)
+	assert.ErrorIs(t, s.realSleep(0), errInterrupted)
+	assert.NoError(t, (&script{}).realSleep(0))
 }
 
 // Blank lines are script formatting between commands, but heredoc content is
@@ -233,8 +233,8 @@ func TestParseScriptKeepsHeredocBlankLines(t *testing.T) {
 	assert.NoError(t, err)
 
 	var typed []string
-	for _, c := range s.Commands {
-		typed = append(typed, assert.Type[Shell](t, c).Cmd)
+	for _, c := range s.commands {
+		typed = append(typed, assert.Type[shell](t, c).cmd)
 	}
 	assert.EqualArrays(t, typed, []string{
 		"cat <<EOF > out.txt\n", "line one\n", "\n", "line three\n", "EOF\n", "echo done\n",
@@ -245,9 +245,9 @@ func TestParseScriptKeepsHeredocBlankLines(t *testing.T) {
 func TestParseScriptHeredocSwallowsCtrlLines(t *testing.T) {
 	s, err := parseScript("cat <<EOF\n#$ delay 100\nEOF\n#$ delay 100\n")
 	assert.NoError(t, err)
-	assert.Len(t, s.Commands, 4)
-	assert.Equal(t, assert.Type[Shell](t, s.Commands[1]).Cmd, "#$ delay 100\n")
-	assert.Equal(t, assert.Type[Delay](t, s.Commands[3]).Interval, 100*time.Millisecond)
+	assert.Len(t, s.commands, 4)
+	assert.Equal(t, assert.Type[shell](t, s.commands[1]).cmd, "#$ delay 100\n")
+	assert.Equal(t, assert.Type[setDelay](t, s.commands[3]).d, 100*time.Millisecond)
 }
 
 func TestHeredocDelim(t *testing.T) {
@@ -277,8 +277,8 @@ func TestHeredocDelim(t *testing.T) {
 func TestParseScriptHeredocDashTerminator(t *testing.T) {
 	s, err := parseScript("cat <<-EOF\n\tbody\n\tEOF\necho after\n")
 	assert.NoError(t, err)
-	assert.Len(t, s.Commands, 4)
-	assert.Equal(t, assert.Type[Shell](t, s.Commands[3]).Cmd, "echo after\n")
+	assert.Len(t, s.commands, 4)
+	assert.Equal(t, assert.Type[shell](t, s.commands[3]).cmd, "echo after\n")
 }
 
 func TestEchoProbe(t *testing.T) {
@@ -331,8 +331,8 @@ func TestFinishWaitsForACleanExit(t *testing.T) {
 func TestParseScriptIgnoresQuotedHeredocMarker(t *testing.T) {
 	s, err := parseScript("echo \"write <<EOF to start one\"\n\necho after\n")
 	assert.NoError(t, err)
-	assert.Len(t, s.Commands, 2)
-	assert.Equal(t, assert.Type[Shell](t, s.Commands[1]).Cmd, "echo after\n")
+	assert.Len(t, s.commands, 2)
+	assert.Equal(t, assert.Type[shell](t, s.commands[1]).cmd, "echo after\n")
 }
 
 func TestPromptMarkerIsUniquePerRun(t *testing.T) {
@@ -460,16 +460,16 @@ func TestSyncPromptStopsWhenInterrupted(t *testing.T) {
 	done := make(chan struct{})
 	close(done)
 	s.done = done
-	s.sleep = s.wait
+	s.sleep = s.realSleep
 
-	assert.ErrorIs(t, s.syncPrompt("sleep 1\n", 0), ErrInterrupted)
+	assert.ErrorIs(t, s.syncPrompt("sleep 1\n", 0), errInterrupted)
 }
 
 // The whole point: the next line isn't typed until the previous one is done.
 func TestTypeAllWaitsForEachCommand(t *testing.T) {
 	s, rec := newRecordedScript(t, 0)
-	s.Commands = []Command{NewShell("a"), NewShell("b")}
-	s.Wait = 0
+	s.commands = []command{newShell("a"), newShell("b")}
+	s.wait = 0
 	s.cmdTimeout = time.Minute
 	s.mon.head = []byte("a") // stands in for the echo confirmEcho looks for
 
@@ -491,8 +491,8 @@ func TestTypeAllWaitsForEachCommand(t *testing.T) {
 // slowly, a timeout per line, but finish.
 func TestTypeAllTypesOnAfterTheTimeout(t *testing.T) {
 	s, rec := newRecordedScript(t, 0)
-	s.Commands = []Command{NewShell("nano f"), NewShell("b")}
-	s.Wait = 0
+	s.commands = []command{newShell("nano f"), newShell("b")}
+	s.wait = 0
 	s.cmdTimeout = time.Millisecond
 	s.mon.head = []byte("nano f")
 
@@ -504,17 +504,17 @@ func TestTypeAllTypesOnAfterTheTimeout(t *testing.T) {
 func TestParseScriptHandover(t *testing.T) {
 	s, err := parseScript("#$ handover - over to you\nnano f\n")
 	assert.NoError(t, err)
-	assert.Len(t, s.Commands, 2)
-	assert.Type[Handover](t, s.Commands[0])
-	assert.Equal(t, assert.Type[Shell](t, s.Commands[1]).Cmd, "nano f\n")
+	assert.Len(t, s.commands, 2)
+	assert.Type[handover](t, s.commands[0])
+	assert.Equal(t, assert.Type[shell](t, s.commands[1]).cmd, "nano f\n")
 }
 
 func TestHandoverArmsTheNextLine(t *testing.T) {
 	s, _ := newRecordedScript(t, 0)
-	assert.That(t, !s.handover, "nothing armed to start with")
+	assert.That(t, !s.armed, "nothing armed to start with")
 
-	assert.NoError(t, Handover{}.Run(s))
-	assert.That(t, s.handover, "the next line should be armed")
+	assert.NoError(t, handover{}.run(s))
+	assert.That(t, s.armed, "the next line should be armed")
 	assert.ContainsString(t, warnings(s), "yours")
 }
 
@@ -531,14 +531,14 @@ func TestScriptHasHandover(t *testing.T) {
 // Each of these leaves the person driving either blind or stuck, so they're
 // worth catching before a take starts rather than halfway through one.
 func TestCheckHandoverRejectsUndriveableSettings(t *testing.T) {
-	assert.Error(t, checkHandover(true, &Options{Quiet: true}), "--quiet")
+	assert.Error(t, checkHandover(true, &options{Quiet: true}), "--quiet")
 
 	// The suite's stdin isn't a terminal, which is the other trap.
-	assert.Error(t, checkHandover(true, &Options{}), "isn't a terminal")
+	assert.Error(t, checkHandover(true, &options{}), "isn't a terminal")
 }
 
 func TestCheckHandoverIgnoresScriptsWithout(t *testing.T) {
-	assert.NoError(t, checkHandover(false, &Options{Quiet: true}))
+	assert.NoError(t, checkHandover(false, &options{Quiet: true}))
 }
 
 // A keypress only belongs in the recording while the terminal is on loan.
@@ -591,7 +591,7 @@ func TestHandOverEndsOnThePrompt(t *testing.T) {
 	restored := false
 	s.raw = func() (func(), error) { return func() { restored = true }, nil }
 
-	assert.NoError(t, s.handOver(0))
+	assert.NoError(t, s.lendTerminal(0))
 	assert.That(t, restored, "the terminal should be handed back")
 }
 
@@ -599,7 +599,7 @@ func TestHandOverFailsWhenTheTerminalWont(t *testing.T) {
 	s, _ := newRecordedScript(t, 0)
 	s.raw = func() (func(), error) { return nil, errors.New("not a terminal") }
 
-	assert.Error(t, s.handOver(0), "not a terminal")
+	assert.Error(t, s.lendTerminal(0), "not a terminal")
 }
 
 func TestHandOverStopsWhenInterrupted(t *testing.T) {
@@ -608,17 +608,17 @@ func TestHandOverStopsWhenInterrupted(t *testing.T) {
 	done := make(chan struct{})
 	close(done)
 	s.done = done
-	s.sleep = s.wait
+	s.sleep = s.realSleep
 
-	assert.ErrorIs(t, s.handOver(0), ErrInterrupted)
+	assert.ErrorIs(t, s.lendTerminal(0), errInterrupted)
 }
 
 // The armed line waits on the keyboard rather than the clock, and only that
 // line: the one after it goes back to the ordinary timed sync.
 func TestTypeAllHandsOverOnlyTheArmedLine(t *testing.T) {
 	s, rec := newRecordedScript(t, 0)
-	s.Commands = []Command{Handover{}, NewShell("nano f"), NewShell("echo after")}
-	s.Wait = 0
+	s.commands = []command{handover{}, newShell("nano f"), newShell("echo after")}
+	s.wait = 0
 	s.cmdTimeout = time.Minute
 	s.mon.head = []byte("nano f")
 
@@ -637,7 +637,7 @@ func TestTypeAllHandsOverOnlyTheArmedLine(t *testing.T) {
 	assert.NoError(t, s.typeAll(0))
 	assert.EqualArrays(t, typedLines(rec), []string{"nano f\n", "echo after\n"})
 	assert.Equal(t, lent, 1)
-	assert.That(t, !s.handover, "the arming should be spent")
+	assert.That(t, !s.armed, "the arming should be spent")
 }
 
 // syncWriter is a bytes.Buffer safe to read from one goroutine while the
@@ -672,7 +672,7 @@ func (s *syncWriter) await(t *testing.T, want string) {
 }
 
 func TestTermSizeUsesWhatWasAskedFor(t *testing.T) {
-	cols, rows := termSize(&Options{Cols: 100, Rows: 30})
+	cols, rows := termSize(&options{Cols: 100, Rows: 30})
 	assert.Equal(t, cols, uint16(100))
 	assert.Equal(t, rows, uint16(30))
 }
@@ -680,15 +680,15 @@ func TestTermSizeUsesWhatWasAskedFor(t *testing.T) {
 // A dimension left at zero gets filled in from somewhere -- the real terminal,
 // or 80x24 when there isn't one -- without disturbing the one that was given.
 func TestTermSizeFillsInWhatWasNot(t *testing.T) {
-	cols, rows := termSize(&Options{Cols: 100})
+	cols, rows := termSize(&options{Cols: 100})
 	assert.Equal(t, cols, uint16(100))
 	assert.That(t, rows > 0, "rows should be filled in")
 
-	cols, rows = termSize(&Options{Rows: 30})
+	cols, rows = termSize(&options{Rows: 30})
 	assert.Equal(t, rows, uint16(30))
 	assert.That(t, cols > 0, "cols should be filled in")
 
-	cols, rows = termSize(&Options{})
+	cols, rows = termSize(&options{})
 	assert.That(t, cols > 0 && rows > 0, "both should be filled in")
 }
 
@@ -706,8 +706,8 @@ func TestControlCommandsChangeTheTiming(t *testing.T) {
 	s.mon.head = []byte("ab")
 
 	assert.NoError(t, s.typeAll(0))
-	assert.Equal(t, s.Delay, 70*time.Millisecond)
-	assert.Equal(t, s.Wait, 250*time.Millisecond)
+	assert.Equal(t, s.delay, 70*time.Millisecond)
+	assert.Equal(t, s.wait, 250*time.Millisecond)
 	assert.EqualArrays(t, rec.events, []string{
 		"s:0s", // the settle
 		"s:70ms", "w:a",
@@ -740,7 +740,7 @@ func TestWaitAppliesToTheLineThatFollowsIt(t *testing.T) {
 func TestSyncPromptPollsUntilThePromptArrives(t *testing.T) {
 	s, _ := newRecordedScript(t, 0)
 	s.cmdTimeout = 5 * time.Second
-	s.sleep = s.wait // real sleeps: the polling is the thing under test
+	s.sleep = s.realSleep // real sleeps: the polling is the thing under test
 
 	const late = 60 * time.Millisecond
 	go func() {
@@ -763,10 +763,10 @@ func TestSyncPromptPollsUntilThePromptArrives(t *testing.T) {
 // second line must not reach the pty until the first line's prompt is back.
 func TestTypeAllHoldsTheNextLineUntilThePromptComesBack(t *testing.T) {
 	s, rec := newRecordedScript(t, 0)
-	s.Commands = []Command{NewShell("first"), NewShell("second")}
-	s.Wait = 0
+	s.commands = []command{newShell("first"), newShell("second")}
+	s.wait = 0
 	s.cmdTimeout = 5 * time.Second
-	s.sleep = s.wait
+	s.sleep = s.realSleep
 	s.mon.head = []byte("first")
 
 	// Each line's prompt comes back a while after it was typed, never during.

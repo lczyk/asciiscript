@@ -10,7 +10,7 @@ import (
 
 // keystroke is one unit of typing: bytes to write, then a pause to sleep after.
 // A []keystroke plan is the entire API surface between the jitter subsystem
-// (which produces plans) and Shell.Run (which replays them onto the pty).
+// (which produces plans) and shell.Run (which replays them onto the pty).
 type keystroke struct {
 	data  string
 	pause time.Duration

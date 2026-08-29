@@ -140,9 +140,9 @@ func FuzzParseScript(f *testing.F) {
 		s, err := parseScript(text)
 		if err != nil {
 			switch {
-			case strings.Contains(err.Error(), ErrUnknownCtrl.Error()),
-				strings.Contains(err.Error(), ErrNoArgs.Error()),
-				strings.Contains(err.Error(), ErrBadArg.Error()):
+			case strings.Contains(err.Error(), errUnknownCtrl.Error()),
+				strings.Contains(err.Error(), errNoArgs.Error()),
+				strings.Contains(err.Error(), errBadArg.Error()):
 				return
 			}
 			t.Fatalf("parseScript(%q) failed with an unreportable error: %v", text, err)
@@ -150,15 +150,15 @@ func FuzzParseScript(f *testing.F) {
 
 		lines := strings.Split(text, "\n")
 		at := 0
-		for i, c := range s.Commands {
-			sh, ok := c.(Shell)
+		for i, c := range s.commands {
+			sh, ok := c.(shell)
 			if !ok {
 				continue
 			}
-			if !strings.HasSuffix(sh.Cmd, "\n") {
-				t.Fatalf("parseScript(%q) command %d is %q, which would never run", text, i, sh.Cmd)
+			if !strings.HasSuffix(sh.cmd, "\n") {
+				t.Fatalf("parseScript(%q) command %d is %q, which would never run", text, i, sh.cmd)
 			}
-			want := strings.TrimSuffix(sh.Cmd, "\n")
+			want := strings.TrimSuffix(sh.cmd, "\n")
 			for at < len(lines) && lines[at] != want {
 				at++
 			}

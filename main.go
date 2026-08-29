@@ -22,18 +22,18 @@ import (
 	"golang.org/x/term"
 )
 
-// CtrlPrefix marks a control line in a script, e.g. "#$ delay 100".
-const CtrlPrefix = "#$"
+// ctrlPrefix marks a control line in a script, e.g. "#$ delay 100".
+const ctrlPrefix = "#$"
 
 var (
-	ErrUnknownCtrl = errors.New("unknown control command")
-	ErrNoArgs      = errors.New("no arguments given to command")
-	ErrBadArg      = errors.New("invalid command argument")
-	ErrInterrupted = errors.New("interrupted")
+	errUnknownCtrl = errors.New("unknown control command")
+	errNoArgs      = errors.New("no arguments given to command")
+	errBadArg      = errors.New("invalid command argument")
+	errInterrupted = errors.New("interrupted")
 )
 
-// Options is the command-line configuration, parsed by go-flags.
-type Options struct {
+// options is the command-line configuration, parsed by go-flags.
+type options struct {
 	Cols   int     `long:"cols" description:"terminal width in columns (default: current terminal)"`
 	Rows   int     `long:"rows" description:"terminal height in rows (default: current terminal)"`
 	Settle int     `long:"settle" default:"2000" description:"ms to wait for asciinema to warm up before typing"`
@@ -63,7 +63,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	var opts Options
+	var opts options
 	parser := flags.NewParser(&opts, flags.Default)
 	parser.Usage = "[OPTIONS]"
 	if _, err := parser.Parse(); err != nil {
@@ -77,39 +77,39 @@ func main() {
 		log.Fatal("can't find asciinema executable on PATH")
 	}
 
-	s, err := NewScript(opts.Args.Script)
+	s, err := loadScript(opts.Args.Script)
 	if err != nil {
 		log.Fatal("parsing script failed: ", err)
 	}
 
-	if err := s.Run(&opts); err != nil {
+	if err := s.record(&opts); err != nil {
 		log.Fatal(err)
 	}
 }
 
-// Command is an action to be run against a running Script.
-type Command interface {
-	Run(*Script) error
+// command is an action to be run against a running script.
+type command interface {
+	run(*script) error
 }
 
-// Shell is a line of input to type into the recorded shell.
-type Shell struct {
-	Cmd string
+// shell is a line of input to type into the recorded shell.
+type shell struct {
+	cmd string
 }
 
-// NewShell creates a new Shell, ensuring the line ends in a newline so it runs.
-func NewShell(cmd string) Shell {
+// newShell creates a new shell, ensuring the line ends in a newline so it runs.
+func newShell(cmd string) shell {
 	if !strings.HasSuffix(cmd, "\n") {
 		cmd += "\n"
 	}
-	return Shell{Cmd: cmd}
+	return shell{cmd: cmd}
 }
 
 // Run types the command by replaying the jitter subsystem's keystroke plan:
 // wait out the planned pause, then write the bytes. The pause belongs before
 // its keystroke -- that is the gap the timing model computed it for.
-func (s Shell) Run(sc *Script) error {
-	for _, k := range sc.jitter.plan(s.Cmd, sc.base()) {
+func (s shell) run(sc *script) error {
+	for _, k := range sc.jitter.plan(s.cmd, sc.base()) {
 		if err := sc.sleep(k.pause); err != nil {
 			return err
 		}
@@ -120,80 +120,68 @@ func (s Shell) Run(sc *Script) error {
 	return nil
 }
 
-// Wait changes the interval between subsequent commands.
-type Wait struct {
-	Duration time.Duration
-}
+// setWait changes the pause between subsequent commands.
+type setWait struct{ d time.Duration }
 
-func NewWait(opts []string) (Wait, error) {
+func (w setWait) run(s *script) error { s.wait = w.d; return nil }
+
+// setDelay changes the typing speed (interval between keystrokes) of subsequent commands.
+type setDelay struct{ d time.Duration }
+
+func (d setDelay) run(s *script) error { s.delay = d.d; return nil }
+
+// millis parses a control command's single argument, in milliseconds.
+func millis(opts []string) (time.Duration, error) {
 	if len(opts) == 0 {
-		return Wait{}, ErrNoArgs
+		return 0, errNoArgs
 	}
-	ms, err := strconv.ParseInt(strings.TrimSpace(opts[0]), 10, 64)
+	ms, err := strconv.ParseInt(opts[0], 10, 64)
 	if err != nil {
-		return Wait{}, ErrBadArg
+		return 0, errBadArg
 	}
-	return Wait{Duration: time.Millisecond * time.Duration(ms)}, nil
+	return time.Millisecond * time.Duration(ms), nil
 }
 
-func (w Wait) Run(s *Script) error { s.Wait = w.Duration; return nil }
-
-// Delay changes the typing speed (interval between keystrokes) of subsequent commands.
-type Delay struct {
-	Interval time.Duration
-}
-
-func NewDelay(opts []string) (Delay, error) {
-	if len(opts) == 0 {
-		return Delay{}, ErrNoArgs
-	}
-	ms, err := strconv.ParseInt(strings.TrimSpace(opts[0]), 10, 64)
-	if err != nil {
-		return Delay{}, ErrBadArg
-	}
-	return Delay{Interval: time.Millisecond * time.Duration(ms)}, nil
-}
-
-func (d Delay) Run(sc *Script) error { sc.Delay = d.Interval; return nil }
-
-// Handover gives the next line to whoever is running the recording: it gets
+// handover gives the next line to whoever is running the recording: it gets
 // typed as usual, and then the real keyboard is wired to the recorded session
 // until the command they were handed ends. For the commands nothing else can
 // drive -- an editor, a REPL, anything wanting a keypress -- and the session
 // records what they do exactly as if it had been typed by the script.
-type Handover struct{}
+type handover struct{}
 
-func (h Handover) Run(s *Script) error {
-	s.handover = true
+func (h handover) run(s *script) error {
+	s.armed = true
 	fmt.Fprintln(s.warn, "asciiscript: the next command is yours -- the script picks up again once it drops you back at a prompt")
 	return nil
 }
 
-// NewCtrl parses a control command (the text after the "#$" prefix).
-func NewCtrl(cmd string) (Command, error) {
+// newCtrl parses a control command (the text after the "#$" prefix).
+func newCtrl(cmd string) (command, error) {
 	tokens := strings.Fields(cmd)
 	if len(tokens) == 0 {
-		return nil, ErrUnknownCtrl
+		return nil, errUnknownCtrl
 	}
 	switch tokens[0] {
 	case "delay":
-		return NewDelay(tokens[1:])
+		d, err := millis(tokens[1:])
+		return setDelay{d}, err
 	case "wait":
-		return NewWait(tokens[1:])
+		d, err := millis(tokens[1:])
+		return setWait{d}, err
 	case "handover":
-		return Handover{}, nil
+		return handover{}, nil
 	default:
-		return nil, ErrUnknownCtrl
+		return nil, errUnknownCtrl
 	}
 }
 
-// Script is a parsed sequence of commands to type into a recorded session.
-type Script struct {
-	Commands []Command
-	Delay    time.Duration // between keystrokes
-	Wait     time.Duration // between commands
+// script is a parsed sequence of commands to type into a recorded session.
+type script struct {
+	commands []command
+	delay    time.Duration // between keystrokes
+	wait     time.Duration // between commands
 
-	speed  float64         // typing-speed multiplier applied to Delay (1 = as written)
+	speed  float64         // typing-speed multiplier applied to delay (1 = as written)
 	pty    io.WriteCloser  // pty master; keystrokes get written here
 	jitter *jitter         // plans the human-like keystroke timing
 	mon    *mirror         // asciinema's output, watched for our own keystrokes
@@ -204,8 +192,8 @@ type Script struct {
 	cmdTimeout time.Duration
 	warn       io.Writer // where warnings go; never the pty, which is being recorded
 
-	keys     *keyboard // the real terminal's input, on loan during a handover
-	handover bool      // armed by `#$ handover`, spent by the next line typed
+	keys  *keyboard // the real terminal's input, on loan during a handover
+	armed bool      // set by `#$ handover`, spent by the next line typed
 
 	// raw puts the real terminal into raw mode for the duration of a handover
 	// and returns the undo. Tests swap it out for one without a terminal.
@@ -216,12 +204,12 @@ type Script struct {
 	sleep func(time.Duration) error
 }
 
-// wait is the default Script.sleep: sleep d, or abort if a signal lands first.
-func (s *Script) wait(d time.Duration) error {
+// realSleep is the default script.sleep: sleep d, or abort if a signal lands first.
+func (s *script) realSleep(d time.Duration) error {
 	if d <= 0 {
 		select {
 		case <-s.done:
-			return ErrInterrupted
+			return errInterrupted
 		default:
 			return nil
 		}
@@ -230,23 +218,23 @@ func (s *Script) wait(d time.Duration) error {
 	defer t.Stop()
 	select {
 	case <-s.done:
-		return ErrInterrupted
+		return errInterrupted
 	case <-t.C:
 		return nil
 	}
 }
 
-// base is the effective per-keystroke delay: the current Delay scaled by the
+// base is the effective per-keystroke delay: the current delay scaled by the
 // speed multiplier (higher speed -> shorter delay).
-func (s *Script) base() time.Duration {
+func (s *script) base() time.Duration {
 	if s.speed > 0 {
-		return time.Duration(float64(s.Delay) / s.speed)
+		return time.Duration(float64(s.delay) / s.speed)
 	}
-	return s.Delay
+	return s.delay
 }
 
-// NewScript parses a Script from the file at path.
-func NewScript(path string) (*Script, error) {
+// loadScript parses a script from the file at path.
+func loadScript(path string) (*script, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -254,17 +242,17 @@ func NewScript(path string) (*Script, error) {
 	return parseScript(string(b))
 }
 
-// parseScript parses a Script from raw script text.
-func parseScript(text string) (*Script, error) {
-	s := &Script{
-		Delay: time.Millisecond * 40,
-		Wait:  time.Millisecond * 100,
+// parseScript parses a script from raw script text.
+func parseScript(text string) (*script, error) {
+	s := &script{
+		delay: time.Millisecond * 40,
+		wait:  time.Millisecond * 100,
 		speed: 1.0,
 		mon:   &mirror{},
 		warn:  os.Stderr,
 		keys:  &keyboard{in: os.Stdin},
 	}
-	s.sleep = s.wait
+	s.sleep = s.realSleep
 	s.raw = s.rawStdin
 
 	lines := strings.Split(text, "\n")
@@ -280,7 +268,7 @@ func parseScript(text string) (*Script, error) {
 
 	for i, line := range lines {
 		if heredoc != "" {
-			s.Commands = append(s.Commands, NewShell(line))
+			s.commands = append(s.commands, newShell(line))
 			term := line
 			if heredocDash {
 				term = strings.TrimLeft(term, "\t")
@@ -293,15 +281,15 @@ func parseScript(text string) (*Script, error) {
 		if line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, CtrlPrefix) {
-			ctrl, err := NewCtrl(strings.TrimSpace(line[len(CtrlPrefix):]))
+		if strings.HasPrefix(line, ctrlPrefix) {
+			ctrl, err := newCtrl(strings.TrimSpace(line[len(ctrlPrefix):]))
 			if err != nil {
 				return nil, fmt.Errorf("%w (line %d)", err, i+1)
 			}
-			s.Commands = append(s.Commands, ctrl)
+			s.commands = append(s.commands, ctrl)
 			continue
 		}
-		s.Commands = append(s.Commands, NewShell(line))
+		s.commands = append(s.commands, newShell(line))
 		heredoc, heredocDash = heredocDelim(line)
 	}
 
@@ -440,7 +428,7 @@ func stripQueries(buf []byte) []byte {
 // termSize resolves the recording window size. A dimension set on the command
 // line wins; any left at 0 is filled from the current terminal (stdin), falling
 // back to 80x24 when stdin isn't a terminal (e.g. piped or backgrounded).
-func termSize(o *Options) (cols, rows uint16) {
+func termSize(o *options) (cols, rows uint16) {
 	cols, rows = uint16(o.Cols), uint16(o.Rows)
 	if cols != 0 && rows != 0 {
 		return cols, rows
@@ -559,7 +547,7 @@ func echoProbe(line string) string {
 // too small a --settle means every keystroke lands in the void: the recording
 // comes out empty and `exit` never arrives either. Checking the first line
 // turns that into an error instead of a silent take.
-func (s *Script) confirmEcho(line string, settle time.Duration) error {
+func (s *script) confirmEcho(line string, settle time.Duration) error {
 	probe := echoProbe(line)
 	if probe == "" {
 		return nil
@@ -585,7 +573,7 @@ func (s *Script) confirmEcho(line string, settle time.Duration) error {
 // pager, anything reading stdin -- can't be waited for, because the input that
 // would end it is the input being held back. Those run the timeout out, say so,
 // and get typed over anyway.
-func (s *Script) syncPrompt(line string, before int) error {
+func (s *script) syncPrompt(line string, before int) error {
 	deadline := time.Now().Add(s.cmdTimeout)
 	for s.mon.marked() <= before {
 		if time.Now().After(deadline) {
@@ -650,11 +638,11 @@ func (k *keyboard) lend(w io.Writer) func() {
 	}
 }
 
-// rawStdin is the default Script.raw: raw mode means the keys a handed-over
+// rawStdin is the default script.raw: raw mode means the keys a handed-over
 // command wants -- ctrl-o, ctrl-x, arrows -- reach it as themselves rather than
 // being buffered into lines or turned into signals, and stops the terminal
 // echoing input that the recorded session is already echoing back.
-func (s *Script) rawStdin() (func(), error) {
+func (s *script) rawStdin() (func(), error) {
 	fd := int(os.Stdin.Fd())
 	prev, err := term.MakeRaw(fd)
 	if err != nil {
@@ -663,10 +651,10 @@ func (s *Script) rawStdin() (func(), error) {
 	return func() { _ = term.Restore(fd, prev) }, nil
 }
 
-// handOver types nothing and waits for nobody: the person running the recording
+// lendTerminal types nothing and waits for nobody: the person running the recording
 // drives the command that was just typed, and the script resumes when they land
 // back at a prompt. There is no deadline -- the wait is on a human.
-func (s *Script) handOver(before int) error {
+func (s *script) lendTerminal(before int) error {
 	restore, err := s.raw()
 	if err != nil {
 		return err
@@ -687,7 +675,7 @@ func (s *Script) handOver(before int) error {
 // checkHandover rejects the settings a `#$ handover` script can't work under.
 // Both are silent traps otherwise: the person driving would be typing into a
 // session they can't see, or one nothing is listening on.
-func checkHandover(wants bool, o *Options) error {
+func checkHandover(wants bool, o *options) error {
 	if !wants {
 		return nil
 	}
@@ -701,9 +689,9 @@ func checkHandover(wants bool, o *Options) error {
 }
 
 // hasHandover reports whether the script hands the terminal over at any point.
-func (s *Script) hasHandover() bool {
-	for _, c := range s.Commands {
-		if _, ok := c.(Handover); ok {
+func (s *script) hasHandover() bool {
+	for _, c := range s.commands {
+		if _, ok := c.(handover); ok {
 			return true
 		}
 	}
@@ -718,13 +706,13 @@ func (s *Script) hasHandover() bool {
 // prompt doesn't help (it shows up long before input forwarding is live), so
 // the settle is a plain fixed wait and confirmEcho checks afterwards that it was
 // long enough.
-func (s *Script) typeAll(settle time.Duration) error {
+func (s *script) typeAll(settle time.Duration) error {
 	if err := s.sleep(settle); err != nil {
 		return err
 	}
 	typed := false
-	for _, c := range s.Commands {
-		sh, typing := c.(Shell)
+	for _, c := range s.commands {
+		sh, typing := c.(shell)
 
 		// A control line is a note to asciiscript, not something the recorded
 		// shell ever sees: it is never typed and never finishes, so it earns
@@ -732,34 +720,34 @@ func (s *Script) typeAll(settle time.Duration) error {
 		// precedes, `#$ wait N` takes effect on the very next line -- which is
 		// where a script puts it to slow something down.
 		if !typing {
-			if err := c.Run(s); err != nil {
+			if err := c.run(s); err != nil {
 				return err
 			}
 			continue
 		}
 		if typed {
-			if err := s.sleep(s.Wait); err != nil {
+			if err := s.sleep(s.wait); err != nil {
 				return err
 			}
 		}
 
 		before := s.mon.marked()
-		if err := c.Run(s); err != nil {
+		if err := c.run(s); err != nil {
 			return err
 		}
 		if !typed {
 			typed = true
-			if err := s.confirmEcho(sh.Cmd, settle); err != nil {
+			if err := s.confirmEcho(sh.cmd, settle); err != nil {
 				return err
 			}
 		}
 
 		var err error
-		if s.handover {
-			s.handover = false
-			err = s.handOver(before)
+		if s.armed {
+			s.armed = false
+			err = s.lendTerminal(before)
 		} else {
-			err = s.syncPrompt(sh.Cmd, before)
+			err = s.syncPrompt(sh.cmd, before)
 		}
 		if err != nil {
 			return err
@@ -767,7 +755,7 @@ func (s *Script) typeAll(settle time.Duration) error {
 	}
 	// One last pause, so the closing output gets a beat before `exit` lands.
 	if typed {
-		return s.sleep(s.Wait)
+		return s.sleep(s.wait)
 	}
 	return nil
 }
@@ -806,7 +794,7 @@ func finish(cmd *exec.Cmd, w io.Writer, timeout time.Duration) error {
 // Run records the script to outfile by hosting `asciinema rec` inside a pty and
 // injecting keystrokes into it. asciinema sees a real terminal, so it runs
 // interactively and forwards our keystrokes to the shell it records.
-func (s *Script) Run(o *Options) error {
+func (s *script) record(o *options) error {
 	if o.Speed <= 0 {
 		return fmt.Errorf("--speed must be greater than 0 (got %g)", o.Speed)
 	}

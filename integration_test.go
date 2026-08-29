@@ -11,7 +11,7 @@ import (
 	"github.com/lczyk/assert"
 )
 
-// The unit tests drive Script against a fake pty and a fake clock, which leaves
+// The unit tests drive script against a fake pty and a fake clock, which leaves
 // the part that only exists in a real terminal -- asciinema, the pty, the bash
 // rcfile and the prompt marker that ties them together -- unexercised. These
 // tests record for real and read the .cast back.
@@ -28,7 +28,7 @@ type event struct {
 // record runs a script through a real `asciinema rec` and returns the events it
 // wrote. Skipped rather than failed where asciinema isn't installed: the rest of
 // the suite has no such dependency and shouldn't grow one.
-func record(t *testing.T, script string, o Options) []event {
+func record(t *testing.T, script string, o options) []event {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("records for real, which takes seconds")
@@ -58,7 +58,7 @@ func record(t *testing.T, script string, o Options) []event {
 	if err != nil {
 		t.Fatalf("parsing the script failed: %v", err)
 	}
-	if err := s.Run(&o); err != nil {
+	if err := s.record(&o); err != nil {
 		t.Fatalf("recording failed: %v", err)
 	}
 	return readCast(t, out)
@@ -127,7 +127,7 @@ func submitted(t *testing.T, events []event, line string) int {
 }
 
 func TestRecordsASession(t *testing.T) {
-	events := record(t, "#$ wait 50\necho alpha\necho bravo\n", Options{})
+	events := record(t, "#$ wait 50\necho alpha\necho bravo\n", options{})
 
 	got := output(events)
 	assert.ContainsString(t, got, "alpha\r\n")
@@ -145,7 +145,7 @@ func TestRecordsASession(t *testing.T) {
 // running sleep is the wait for its prompt. When that regresses, the keystrokes
 // show up in the recording a few hundred milliseconds after the sleep starts.
 func TestWaitsForASlowCommandBeforeTypingTheNext(t *testing.T) {
-	events := record(t, "#$ wait 50\necho alpha\nsleep 2\necho bravo\n", Options{})
+	events := record(t, "#$ wait 50\necho alpha\nsleep 2\necho bravo\n", options{})
 
 	i := submitted(t, events, "sleep 2")
 	next := events[i+1]
@@ -159,7 +159,7 @@ func TestWaitsForASlowCommandBeforeTypingTheNext(t *testing.T) {
 // A marker in every prompt is what the wait watches for, so it has to be in the
 // recording.
 func TestPromptsCarryTheMarker(t *testing.T) {
-	assert.ContainsString(t, output(record(t, "echo hi\n", Options{})), "\x1b]133;D;")
+	assert.ContainsString(t, output(record(t, "echo hi\n", options{})), "\x1b]133;D;")
 }
 
 // Continuation lines sit at PS2, which carries the marker too, so a heredoc
@@ -168,7 +168,7 @@ func TestPromptsCarryTheMarker(t *testing.T) {
 func TestHeredocDoesNotStallOnEveryLine(t *testing.T) {
 	events := record(t,
 		"#$ wait 50\ncat <<'YAML'\nname: demo\nbase: bare\nYAML\n",
-		Options{CmdTimeout: 3000})
+		options{CmdTimeout: 3000})
 
 	got := output(events)
 	assert.ContainsString(t, got, "name: demo\r\nbase: bare\r\n")
