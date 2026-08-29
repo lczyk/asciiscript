@@ -280,7 +280,7 @@ func TestEchoProbe(t *testing.T) {
 }
 
 func TestMirrorSaw(t *testing.T) {
-	m := &mirror{quiet: true}
+	m, _ := newMarkedMirror(t)
 	m.run(strings.NewReader("prompt$ echo hi\r\nhi\r\n"))
 	assert.That(t, m.saw("echo hi"), "should have seen the echoed command")
 	assert.That(t, !m.saw("echo bye"), "should not see what was never typed")
@@ -349,10 +349,6 @@ func TestPromptMarkerPrefixIsZeroWidth(t *testing.T) {
 	assert.ContainsString(t, prefix, "$?") // exit status, for a later --fail-fast
 }
 
-func TestPromptMarkerPrefixEmptyWhenUnset(t *testing.T) {
-	assert.Equal(t, promptMarker{}.prefix(), "")
-}
-
 // Continuation lines sit at PS2, so it needs the marker too -- otherwise every
 // heredoc body line and every trailing backslash waits out the whole timeout.
 func TestBashRCMarksBothPrompts(t *testing.T) {
@@ -362,12 +358,6 @@ func TestBashRCMarksBothPrompts(t *testing.T) {
 	rc := bashRC(m)
 	assert.ContainsString(t, rc, "PS1='"+m.prefix())
 	assert.ContainsString(t, rc, "PS2='"+m.prefix())
-}
-
-func TestBashRCUnmarkedWithoutAMarker(t *testing.T) {
-	rc := bashRC(promptMarker{})
-	assert.That(t, !strings.Contains(rc, "133"), "no marker means no escape sequence")
-	assert.ContainsString(t, rc, "PS1='")
 }
 
 // emitted is one prompt as the recorded shell writes it: the marker with its
@@ -387,12 +377,6 @@ func TestMirrorCountsPrompts(t *testing.T) {
 	mon, m := newMarkedMirror(t)
 	mon.run(strings.NewReader(emitted(m, 0) + "$ echo hi\r\nhi\r\n" + emitted(m, 0) + "$ "))
 	assert.Equal(t, mon.marked(), 2)
-}
-
-func TestMirrorCountsNothingWithoutAMarker(t *testing.T) {
-	mon := &mirror{quiet: true}
-	mon.run(strings.NewReader("\x1b]133;D;0;asciiscript=abc\x07$ "))
-	assert.Equal(t, mon.marked(), 0)
 }
 
 // The pty splits reads wherever it happens to fill, so a marker routinely
@@ -464,7 +448,7 @@ func TestSyncPromptWarnsAndCarriesOnAtTheTimeout(t *testing.T) {
 
 	warning := warnings(s)
 	assert.ContainsString(t, warning, "nano rockcraft.yaml")
-	assert.ContainsString(t, warning, "--no-sync")
+	assert.ContainsString(t, warning, "#$ handover")
 	assert.That(t, !strings.Contains(warning, `\n"`), "the trailing newline should be trimmed")
 }
 
@@ -515,18 +499,6 @@ func TestTypeAllTypesOnAfterTheTimeout(t *testing.T) {
 	assert.ContainsString(t, warnings(s), "nano f")
 }
 
-func TestTypeAllSkipsSyncingWhenOff(t *testing.T) {
-	s, rec := newRecordedScript(t, 0)
-	s.Commands = []Command{NewShell("a"), NewShell("b")}
-	s.Wait = 0
-	s.syncFor = 0
-	s.mon.head = []byte("a")
-
-	assert.NoError(t, s.typeAll(0))
-	assert.EqualArrays(t, typedLines(rec), []string{"a\n", "b\n"})
-	assert.Equal(t, warnings(s), "")
-}
-
 func TestParseScriptHandover(t *testing.T) {
 	s, err := parseScript("#$ handover - over to you\nnano f\n")
 	assert.NoError(t, err)
@@ -558,14 +530,13 @@ func TestScriptHasHandover(t *testing.T) {
 // worth catching before a take starts rather than halfway through one.
 func TestCheckHandoverRejectsUndriveableSettings(t *testing.T) {
 	assert.Error(t, checkHandover(true, &Options{Quiet: true}), "--quiet")
-	assert.Error(t, checkHandover(true, &Options{NoSync: true}), "--no-sync")
 
-	// The suite's stdin isn't a terminal, which is the third trap.
+	// The suite's stdin isn't a terminal, which is the other trap.
 	assert.Error(t, checkHandover(true, &Options{}), "isn't a terminal")
 }
 
 func TestCheckHandoverIgnoresScriptsWithout(t *testing.T) {
-	assert.NoError(t, checkHandover(false, &Options{Quiet: true, NoSync: true}))
+	assert.NoError(t, checkHandover(false, &Options{Quiet: true}))
 }
 
 // A keypress only belongs in the recording while the terminal is on loan.

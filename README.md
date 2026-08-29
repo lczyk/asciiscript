@@ -68,7 +68,6 @@ gotchas worth knowing before you write your own.
     --jitter   human-jitter scale (default 1; 0 = uniform/off, see below)
     --seed     rng seed for --jitter (default: random each run, printed on start)
     --timeout  ms to wait for asciinema to stop after the script ends (default 10000)
-    --no-sync  type the next command without waiting for the previous one to finish
     --cmd-timeout
                ms a command gets to finish before typing carries on (default 600000)
 -v, --version  print the version and exit
@@ -92,12 +91,7 @@ and lines continued with a trailing `\` wait like anything else.
 The exception is a command that never returns to a prompt by itself -- an editor, a pager,
 `ssh`, anything reading stdin. There's nothing to wait for: the keystrokes that would end it
 are the ones being held back. Those run out `--cmd-timeout` (10 minutes by default), print a
-warning naming the command, and get typed over anyway. Hand those over (below), or record
-with `--no-sync` and go back to sizing `#$ wait` by hand:
-
-```sh
-$ asciiscript --no-sync editing-demo.sh demo.cast
-```
+warning naming the command, and get typed over anyway. Hand those over (below).
 
 ## Handover
 
@@ -119,10 +113,9 @@ Your terminal goes into raw mode for the duration, so ctrl-o, ctrl-c, arrows and
 reach the command rather than being buffered into lines or turned into signals. Which also
 means ctrl-c won't stop asciiscript while a handover is live: quit the command first.
 
-Three things a handover needs, all checked before the take starts:
+Two things a handover needs, both checked before the take starts:
 
 - not `--quiet` -- you can't drive what you can't see
-- not `--no-sync` -- the prompt is what tells asciiscript you're done
 - a real terminal on stdin
 
 Worth knowing: `--seed` no longer pins a take once a person is in it, and if `--cols`/`--rows`

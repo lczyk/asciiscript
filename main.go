@@ -35,17 +35,17 @@ var (
 
 // Options is the command-line configuration, parsed by go-flags.
 type Options struct {
-	Cols    int     `long:"cols" description:"terminal width in columns (default: current terminal)"`
-	Rows    int     `long:"rows" description:"terminal height in rows (default: current terminal)"`
-	Settle  int     `long:"settle" default:"2000" description:"ms to wait for asciinema to warm up before typing"`
-	Wait    int     `long:"wait" default:"100" description:"ms to pause after each command finishes (#$ wait overrides per section)"`
-	Speed   float64 `long:"speed" default:"1.0" description:"typing speed multiplier (2 = twice as fast; scales #$ delay)"`
-	Quiet   bool    `short:"q" long:"quiet" description:"do not echo the recorded session to this terminal"`
-	Jitter  float64 `long:"jitter" default:"1.0" description:"human-jitter scale (1 = human-like, 0 = uniform/off)"`
-	Timeout int     `long:"timeout" default:"10000" description:"ms to wait for asciinema to stop after the script ends"`
-	NoSync  bool    `long:"no-sync" description:"type the next command without waiting for the previous one to finish"`
-	CmdSync int     `long:"cmd-timeout" default:"600000" description:"ms to wait for a command to finish before typing on regardless"`
-	Seed    *int64  `long:"seed" description:"rng seed for --jitter (default: random each run, printed on start)"`
+	Cols   int     `long:"cols" description:"terminal width in columns (default: current terminal)"`
+	Rows   int     `long:"rows" description:"terminal height in rows (default: current terminal)"`
+	Settle int     `long:"settle" default:"2000" description:"ms to wait for asciinema to warm up before typing"`
+	Wait   int     `long:"wait" default:"100" description:"ms to pause after each command finishes (#$ wait overrides per section)"`
+	Speed  float64 `long:"speed" default:"1.0" description:"typing speed multiplier (2 = twice as fast; scales #$ delay)"`
+	Quiet  bool    `short:"q" long:"quiet" description:"do not echo the recorded session to this terminal"`
+	Jitter float64 `long:"jitter" default:"1.0" description:"human-jitter scale (1 = human-like, 0 = uniform/off)"`
+	Seed   *int64  `long:"seed" description:"rng seed for --jitter (default: random each run, printed on start)"`
+
+	Timeout int `long:"timeout" default:"10000" description:"ms to wait for asciinema to stop after the script ends"`
+	CmdSync int `long:"cmd-timeout" default:"600000" description:"ms to wait for a command to finish before typing on regardless"`
 
 	// Handled before parsing, since --version has no business needing the
 	// positional args; declared here only so it shows up in --help.
@@ -199,7 +199,7 @@ type Script struct {
 	done   <-chan struct{} // closed on SIGINT/SIGTERM
 
 	// syncFor is how long a typed line gets to finish before typing carries on
-	// anyway. Zero disables the wait, leaving Wait as the only spacing.
+	// anyway.
 	syncFor time.Duration
 	warn    io.Writer // where warnings go; never the pty, which is being recorded
 
@@ -384,9 +384,6 @@ func promptMarkerFor(token string) promptMarker {
 // prefix is the marker as a bash prompt fragment. \[ \] keeps it out of
 // readline's width accounting, so it can't shift the cursor or wrap a line.
 func (p promptMarker) prefix() string {
-	if p.probe == "" {
-		return ""
-	}
 	return `\[\e]133;D;$?;` + p.probe + `\a\]`
 }
 
@@ -470,7 +467,7 @@ func termSize(o *Options) (cols, rows uint16) {
 // not the .cast (which asciinema writes to outfile itself).
 type mirror struct {
 	quiet bool
-	mark  promptMarker // prompt marker to tally; zero when syncing is off
+	mark  promptMarker // prompt marker to tally
 
 	mu    sync.Mutex
 	head  []byte
@@ -510,9 +507,6 @@ func (m *mirror) run(r io.Reader) {
 // Called with m.mu held.
 func (m *mirror) tally(buf []byte) {
 	probe := []byte(m.mark.probe)
-	if len(probe) == 0 {
-		return
-	}
 	b := make([]byte, 0, len(m.tail)+len(buf))
 	b = append(b, m.tail...)
 	b = append(b, buf...)
@@ -532,11 +526,7 @@ func (m *mirror) marked() int {
 // split across two reads passes through intact, which the terminal handles
 // fine, whereas half of one would leave a dangling escape sequence.
 func (m *mirror) clean(buf []byte) []byte {
-	buf = stripQueries(buf)
-	if m.mark.strip != nil {
-		buf = m.mark.strip.ReplaceAll(buf, nil)
-	}
-	return buf
+	return m.mark.strip.ReplaceAll(stripQueries(buf), nil)
 }
 
 // saw reports whether text has appeared in asciinema's output so far.
@@ -597,13 +587,13 @@ func (s *Script) confirmEcho(line string, settle time.Duration) error {
 // A command that never returns to a prompt of its own accord -- an editor, a
 // pager, anything reading stdin -- can't be waited for, because the input that
 // would end it is the input being held back. Those run the timeout out, say so,
-// and get typed over anyway, which is the fixed-wait behaviour --no-sync gives.
+// and get typed over anyway.
 func (s *Script) syncPrompt(line string, before int) error {
 	deadline := time.Now().Add(s.syncFor)
 	for s.mon.marked() <= before {
 		if time.Now().After(deadline) {
 			fmt.Fprintf(s.warn,
-				"asciiscript: %q hasn't finished after %s -- typing on regardless; if it holds the terminal (an editor, a pager) record with --no-sync\n",
+				"asciiscript: %q hasn't finished after %s -- typing on regardless; if it holds the terminal (an editor, a pager) put `#$ handover` in front of it\n",
 				strings.TrimSuffix(line, "\n"), s.syncFor)
 			return nil
 		}
@@ -698,8 +688,8 @@ func (s *Script) handOver(before int) error {
 }
 
 // checkHandover rejects the settings a `#$ handover` script can't work under.
-// All three are silent traps otherwise: the person driving would be typing into
-// a session they can't see, or one that will never give the terminal back.
+// Both are silent traps otherwise: the person driving would be typing into a
+// session they can't see, or one nothing is listening on.
 func checkHandover(wants bool, o *Options) error {
 	if !wants {
 		return nil
@@ -707,8 +697,6 @@ func checkHandover(wants bool, o *Options) error {
 	switch {
 	case o.Quiet:
 		return errors.New("`#$ handover` needs the session on screen to be driven, so it can't be recorded with --quiet")
-	case o.NoSync:
-		return errors.New("`#$ handover` ends when the shell comes back to a prompt, which --no-sync is what stops asciiscript watching for")
 	case !term.IsTerminal(int(os.Stdin.Fd())):
 		return errors.New("`#$ handover` needs a keyboard to hand over to, and stdin isn't a terminal")
 	}
@@ -770,11 +758,10 @@ func (s *Script) typeAll(settle time.Duration) error {
 		}
 
 		var err error
-		switch {
-		case s.handover:
+		if s.handover {
 			s.handover = false
 			err = s.handOver(before)
-		case s.syncFor > 0:
+		} else {
 			err = s.syncPrompt(sh.Cmd, before)
 		}
 		if err != nil {
@@ -875,18 +862,12 @@ func (s *Script) Run(o *Options) error {
 	}()
 	s.done = done
 
-	// Without the wait there is no reason to mark the prompts, so --no-sync
-	// leaves the recording free of them too.
-	var marker promptMarker
-	if !o.NoSync {
-		m, err := newPromptMarker()
-		if err != nil {
-			return err
-		}
-		marker = m
-		s.syncFor = time.Duration(o.CmdSync) * time.Millisecond
-		s.mon.mark = marker
+	marker, err := newPromptMarker()
+	if err != nil {
+		return err
 	}
+	s.syncFor = time.Duration(o.CmdSync) * time.Millisecond
+	s.mon.mark = marker
 
 	shellCmd, cleanup, err := bashCommand(marker)
 	if err != nil {

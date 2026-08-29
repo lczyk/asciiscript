@@ -156,25 +156,10 @@ func TestWaitsForASlowCommandBeforeTypingTheNext(t *testing.T) {
 	assert.ContainsString(t, output(events), "bravo\r\n")
 }
 
-// And the escape hatch really is an escape hatch: with --no-sync the same
-// script goes back to typing over the running command.
-func TestNoSyncTypesOverARunningCommand(t *testing.T) {
-	events := record(t, "#$ wait 50\necho alpha\nsleep 2\necho bravo\n", Options{NoSync: true})
-
-	i := submitted(t, events, "sleep 2")
-	next := events[i+1]
-	assert.That(t, next.gap < 2,
-		"--no-sync should type on regardless, but the next event waited "+formatSeconds(next.gap))
-}
-
 // A marker in every prompt is what the wait watches for, so it has to be in the
-// recording -- and --no-sync, which needs no marker, shouldn't leave one.
+// recording.
 func TestPromptsCarryTheMarker(t *testing.T) {
 	assert.ContainsString(t, output(record(t, "echo hi\n", Options{})), "\x1b]133;D;")
-
-	bare := output(record(t, "echo hi\n", Options{NoSync: true}))
-	assert.That(t, !strings.Contains(bare, "\x1b]133;D;"),
-		"--no-sync should leave the recording unmarked")
 }
 
 // Continuation lines sit at PS2, which carries the marker too, so a heredoc
