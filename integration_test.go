@@ -44,11 +44,11 @@ func record(t *testing.T, script string, o Options) []event {
 	if o.Settle == 0 {
 		o.Settle = 2000
 	}
-	if o.Timeout == 0 {
-		o.Timeout = 10000
+	if o.ExitTimeout == 0 {
+		o.ExitTimeout = 10000
 	}
-	if o.CmdSync == 0 {
-		o.CmdSync = 600000
+	if o.CmdTimeout == 0 {
+		o.CmdTimeout = 600000
 	}
 	if o.Speed == 0 {
 		o.Speed = 2 // twice as fast: less wall clock, same behaviour
@@ -168,7 +168,7 @@ func TestPromptsCarryTheMarker(t *testing.T) {
 func TestHeredocDoesNotStallOnEveryLine(t *testing.T) {
 	events := record(t,
 		"#$ wait 50\ncat <<'YAML'\nname: demo\nbase: bare\nYAML\n",
-		Options{CmdSync: 3000})
+		Options{CmdTimeout: 3000})
 
 	got := output(events)
 	assert.ContainsString(t, got, "name: demo\r\nbase: bare\r\n")

@@ -44,8 +44,8 @@ type Options struct {
 	Jitter float64 `long:"jitter" default:"1.0" description:"human-jitter scale (1 = human-like, 0 = uniform/off)"`
 	Seed   *int64  `long:"seed" description:"rng seed for --jitter (default: random each run, printed on start)"`
 
-	Timeout int `long:"timeout" default:"10000" description:"ms to wait for asciinema to stop after the script ends"`
-	CmdSync int `long:"cmd-timeout" default:"600000" description:"ms to wait for a command to finish before typing on regardless"`
+	CmdTimeout  int `long:"cmd-timeout" default:"600000" description:"ms to wait for a command to finish before typing on regardless"`
+	ExitTimeout int `long:"exit-timeout" default:"10000" description:"ms to wait for asciinema to stop once the script has typed exit"`
 
 	// Handled before parsing, since --version has no business needing the
 	// positional args; declared here only so it shows up in --help.
@@ -825,11 +825,11 @@ func (s *Script) Run(o *Options) error {
 	if o.Settle < 0 {
 		return fmt.Errorf("--settle must be >= 0 (got %d)", o.Settle)
 	}
-	if o.Timeout <= 0 {
-		return fmt.Errorf("--timeout must be greater than 0 (got %d)", o.Timeout)
+	if o.CmdTimeout <= 0 {
+		return fmt.Errorf("--cmd-timeout must be greater than 0 (got %d)", o.CmdTimeout)
 	}
-	if o.CmdSync <= 0 {
-		return fmt.Errorf("--cmd-timeout must be greater than 0 (got %d)", o.CmdSync)
+	if o.ExitTimeout <= 0 {
+		return fmt.Errorf("--exit-timeout must be greater than 0 (got %d)", o.ExitTimeout)
 	}
 	if err := checkHandover(s.hasHandover(), o); err != nil {
 		return err
@@ -866,7 +866,7 @@ func (s *Script) Run(o *Options) error {
 	if err != nil {
 		return err
 	}
-	s.syncFor = time.Duration(o.CmdSync) * time.Millisecond
+	s.syncFor = time.Duration(o.CmdTimeout) * time.Millisecond
 	s.mon.mark = marker
 
 	shellCmd, cleanup, err := bashCommand(marker)
@@ -903,7 +903,7 @@ func (s *Script) Run(o *Options) error {
 
 	// Stop the recording either way: on an interrupt or a half-typed script,
 	// asciinema still has to be told to stop and flush what it has.
-	grace := time.Duration(o.Timeout) * time.Millisecond
+	grace := time.Duration(o.ExitTimeout) * time.Millisecond
 	if typed != nil {
 		grace = killGrace
 	}

@@ -67,9 +67,11 @@ gotchas worth knowing before you write your own.
 -q, --quiet    don't mirror the recorded session to this terminal
     --jitter   human-jitter scale (default 1; 0 = uniform/off, see below)
     --seed     rng seed for --jitter (default: random each run, printed on start)
-    --timeout  ms to wait for asciinema to stop after the script ends (default 10000)
     --cmd-timeout
                ms a command gets to finish before typing carries on (default 600000)
+    --exit-timeout
+               ms to wait for asciinema to stop once the script has typed exit
+               (default 10000)
 -v, --version  print the version and exit
 ```
 
@@ -163,7 +165,7 @@ $ asciiscript --seed 12345 demo.sh demo.cast       # reproduce a specific take
   checked for its echo and the run stops with an error rather than writing an empty recording.
 - The script ends by typing `exit`. Anything still holding the terminal at that point -- a
   pager, an unterminated quote, a command reading stdin -- swallows it, so asciinema is given
-  `--timeout` to stop and is killed after that.
+  `--exit-timeout` to stop and is killed after that.
 - `Ctrl-C` stops the recording rather than abandoning it: asciinema is told to stop so it can
   flush what it has, and the temporary rcfile is cleaned up.
 - The `VERSION` file is the source of truth for the version. `make` stamps it into the binary

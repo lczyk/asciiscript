@@ -39,7 +39,7 @@ $ asciiscript --seed 12345 examples/git.sh out.cast      # reproduce a take you 
   `git log`, `git diff`, `man` and friends open `less` and wait for a keypress the script never
   types. Waiting can't help here -- the keystrokes that would dismiss the pager are the ones
   being held back -- so the line burns `--cmd-timeout`, warns, and the run then fails on
-  `--timeout` instead of finishing. Set `PAGER=cat` (or `GIT_PAGER=cat`, or pass `--no-pager`).
+  `--exit-timeout` instead of finishing. Set `PAGER=cat` (or `GIT_PAGER=cat`, or pass `--no-pager`).
   When the demo genuinely wants one -- an editor, a REPL -- put `#$ handover` in front of it
   and drive it yourself; see `handover.sh`.
 - **Mind the `!`.** The recorded shell is interactive, so history expansion is on and
