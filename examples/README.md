@@ -7,8 +7,8 @@ $ asciiscript examples/hello.sh hello.cast
 $ asciinema play hello.cast
 ```
 
-- **`hello.sh`** -- the README demo. The smallest thing that shows `#$ delay` and `#$ wait`.
-- **`pacing.sh`** -- `#$ delay` and `#$ wait` in anger: fast lines, slow lines, and giving
+- **`hello.sh`** -- the README demo. The smallest thing that shows `#$ delay` and `#$ pause`.
+- **`pacing.sh`** -- `#$ delay` and `#$ pause` in anger: fast lines, slow lines, and giving
   output room to breathe.
 - **`handover.sh`** -- `#$ handover` in practice: the script sets a file up, hands you the
   editor to change one line, and carries on once you quit. Needs a real terminal, so run it
@@ -35,6 +35,13 @@ $ asciiscript --seed 12345 examples/git.sh out.cast      # reproduce a take you 
 - **Only `#$` lines are control lines.** Every other line is typed into the shell, ordinary
   `#` comments included -- they show up in the recording. Useful for narration, easy to
   forget when you write a header comment nobody was meant to see.
+- **A control line is for the one command under it.** `#$ delay 15` types that command fast
+  and the next one at the usual pace again; there's nothing to reset. Several control lines in
+  front of one command all apply to it.
+- **Multi-line commands are one command.** A heredoc, a trailing `\`, or a quote left open
+  carries the command onto the following lines, which are typed as they stand -- a blank line
+  or a `#$` line in there is content, not formatting -- and the control lines in front cover
+  all of it.
 - **Anything that pages will stall the take.** The recorded session is a real terminal, so
   `git log`, `git diff`, `man` and friends open `less` and wait for a keypress the script never
   types. Waiting can't help here -- the keystrokes that would dismiss the pager are the ones
@@ -45,9 +52,10 @@ $ asciiscript --seed 12345 examples/git.sh out.cast      # reproduce a take you 
 - **Mind the `!`.** The recorded shell is interactive, so history expansion is on and
   `echo "done!"` dies with `bash: !": event not found`. Single-quote the string, or start the
   script with `set +H`.
-- **`#$ wait` is breathing room, not a runtime guess.** Each line is typed only once the
-  previous command has finished, so a slow build needs no padding -- `#$ wait` is the extra
-  beat on top, for letting output be read.
+- **`#$ pause` is breathing room, not a runtime guess.** Each command is typed only once the
+  previous one has finished, so a slow build needs no padding -- `#$ pause` is the extra beat
+  on top, for letting output be read. One at the end of the script holds the final prompt
+  before the session ends.
 - **Start from a clean slate.** Work in a scratch directory the script clears on its first
   line, or a second take begins from whatever the first one left behind. The same goes for
   config a tool reads from `$HOME` -- neutralise it if the demo should look the same

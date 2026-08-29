@@ -17,19 +17,21 @@ First, create a script.
 echo "Hello, world..."
 echo "Here's a demo of asciiscript."
 
-# Comments with a '$' are control commands.
+# Comments with a '$' are control lines. Each one applies to the next command only.
 
-#$ delay 100  - Time between keypresses for subsequent commands (milliseconds).
+#$ delay 100  - Time between keypresses for this command (milliseconds).
 echo "We can type slow..."
 #$ delay 10
 echo "Or quite fast."
 
-#$ wait 100  - Pause after each command finishes, before the next (milliseconds).
-sleep 1 && echo "The next line waits for this to finish on its own..."
-#$ wait 500
-echo "...and then this one gets a longer beat before it."
+echo "And the line after is back to the usual pace."
 
+#$ pause 1500  - Hold the previous output on screen this long before typing (milliseconds).
+echo "...that gave the line above room to be read."
+
+sleep 1 && echo "A slow command needs no pause: the next line waits for it on its own."
 echo 'I hope you like it!'
+#$ pause 1000
 ```
 
 Then record it.
@@ -39,15 +41,23 @@ $ asciiscript demo.sh demo.cast
 $ asciinema play demo.cast
 ```
 
-Three control commands:
+Three control lines, each for the one command written under it:
 
-- `#$ delay N` -- time between keypresses (typing speed), in ms. Default 40.
-- `#$ wait N` -- pause after a command finishes, before the next one is typed, in ms.
-  Default 100. The pause belongs to the line below it, so a `#$ wait` slows down the very
-  next command. It's breathing room, not a runtime guess: waiting for the command itself is
-  automatic (see [Waiting](#waiting)).
-- `#$ handover` -- give the next command to whoever is running the recording. Takes no
-  argument (see [Handover](#handover)).
+- `#$ delay N` -- time between keypresses (typing speed) for that command, in ms. Default 40.
+- `#$ pause N` -- how long to sit at the prompt before typing that command, in ms. By default
+  the gap is a beat of the typing model's own (a couple of keystrokes' worth), which is enough
+  for the eye to follow; a `#$ pause` is for letting output be read. It's breathing room, not
+  a runtime guess: waiting for the previous command to finish is automatic (see
+  [Waiting](#waiting)). At the very end of a script, a `#$ pause` holds the last prompt that
+  long before the session ends.
+- `#$ handover` -- give that command to whoever is running the recording. Takes no argument
+  (see [Handover](#handover)).
+
+A command is usually one line. A heredoc, a line ending in `\`, or a quote left open runs it on
+to the following lines, and asciiscript reads those the way bash does: as part of the same
+command, every line literal -- blank lines and `#$` lines included -- and any control lines in
+front apply to the whole of it. A command that never ends (a heredoc missing its terminator, a
+quote never closed) is a parse error, as is a `#$ delay` or `#$ handover` with nothing after it.
 
 Scripts run in a clean `bash` -- a minimal coloured prompt from a throwaway rcfile, no user
 dotfiles, macOS deprecation banner silenced -- so demos come out consistent. Write the script
@@ -62,14 +72,15 @@ gotchas worth knowing before you write your own.
     --cols     terminal width in columns (default: current terminal, else 80)
     --rows     terminal height in rows (default: current terminal, else 24)
     --settle   ms to wait for asciinema to warm up before typing (default 2000)
-    --speed    typing speed multiplier (default 1; 2 = twice as fast, scales #$ delay)
+    --speed    take speed multiplier (default 1; 2 = twice as fast, scales every
+               #$ delay and #$ pause and the model's own gaps)
 -q, --quiet    don't mirror the recorded session to this terminal
     --jitter   human-jitter scale (default 1; 0 = uniform/off, see below)
     --seed     rng seed for --jitter (default: random each run, printed on start)
     --cmd-timeout
                ms a command gets to finish before typing carries on (default 600000)
     --exit-timeout
-               ms to wait for asciinema to stop once the script has typed exit
+               ms to wait for asciinema to stop once the session is ended
                (default 10000)
 -v, --version  print the version and exit
 ```
@@ -80,14 +91,14 @@ $ asciiscript --cols 100 --rows 30 demo.sh demo.cast
 
 ## Waiting
 
-Each command is typed only once the previous one has finished. `#$ wait` is the pause on
-top of that, so a ten-minute build needs no `#$ wait 600000` -- the recording just takes
+Each command is typed only once the previous one has finished. `#$ pause` is the beat on
+top of that, so a ten-minute build needs no `#$ pause 600000` -- the recording just takes
 ten minutes, and asciinema's `idle_time_limit` compresses the dead air on playback.
 Control lines cost nothing themselves; only typed commands get a pause.
 
 This works by giving the recorded shell's prompt an invisible marker (an OSC 133 sequence,
-carrying a token unique to the run) and watching for it. `PS2` carries it too, so heredocs
-and lines continued with a trailing `\` wait like anything else.
+carrying a token unique to the run) and watching for it. `PS2` carries it too, so the lines
+of a heredoc or a `\`-continued command are each waited for like anything else.
 
 The exception is a command that never returns to a prompt by itself -- an editor, a pager,
 `ssh`, anything reading stdin. There's nothing to wait for: the keystrokes that would end it
@@ -96,8 +107,8 @@ warning naming the command, and get typed over anyway. Hand those over (below).
 
 ## Handover
 
-`#$ handover` gives the next command to you. It's typed as usual, and then your keyboard is
-wired to the recorded session until that command drops the shell back at a prompt -- at
+`#$ handover` gives the command under it to you. It's typed as usual, and then your keyboard
+is wired to the recorded session until that command drops the shell back at a prompt -- at
 which point the script picks up again on its own. What you did is in the recording, typed by
 hand and indistinguishable from the rest.
 
@@ -130,16 +141,19 @@ size rather than yours. asciiscript warns when they differ.
 By default the typing is jittered to look hand-done rather than machine-uniform. The model
 (all of it in `jitter.go`, fitted to real captured typing) shapes only the timing -- it never
 alters the text, so a recording always types the script exactly. Everything scales off the
-base delay (`#$ delay`):
+per-keystroke delay (`#$ delay`):
 
 - **digraph-aware timing** -- each pause depends on the previous key: alternating hands are
-  quick, same-finger reaches are slow, and there are longer pauses after spaces and punctuation.
-  On top of that, per-key lognormal jitter.
+  quick, same-finger reaches are slow, and there are longer pauses after spaces, punctuation
+  and at the start of a line. On top of that, per-key lognormal jitter.
 - **hesitation** -- the occasional thinking stall mid-line.
 
+A `#$ pause` is jittered too, around the value asked for, so a scripted beat doesn't land
+with machine precision either.
+
 `--jitter <scale>` sets the intensity: `1` (default) is the full human-like effect, values
-below `1` ease it back toward uniform, and `0` is exactly uniform (steady `#$ delay` between
-keys). Tune the model's constants in `jitter.go` to taste.
+below `1` ease it back toward uniform, and `0` is exactly uniform (a steady `#$ delay` between
+keys, a `#$ pause` to the millisecond). Tune the model's constants in `jitter.go` to taste.
 
 When jitter is on it's driven by a seeded rng, so a run is reproducible: the seed is random by
 default and printed on start (`asciiscript: jitter 1 (seed 12345)`); pass `--seed 12345` to
@@ -162,9 +176,10 @@ $ asciiscript --seed 12345 demo.sh demo.cast       # reproduce a specific take
 - asciinema doesn't accept input for a second or two after launch, which is what `--settle`
   covers. Set it too low and every keystroke lands in the void, so the first line typed is
   checked for its echo and the run stops with an error rather than writing an empty recording.
-- The script ends by typing `exit`. Anything still holding the terminal at that point -- a
-  pager, an unterminated quote, a command reading stdin -- swallows it, so asciinema is given
-  `--exit-timeout` to stop and is killed after that.
+- The session is ended the way you'd end one by hand: end-of-input (ctrl-d) at the prompt,
+  which bash answers with its own `exit`. Anything still holding the terminal at that point --
+  a pager, a command reading stdin -- swallows it, so asciinema is given `--exit-timeout` to
+  stop and is killed after that.
 - `Ctrl-C` stops the recording rather than abandoning it: asciinema is told to stop so it can
   flush what it has, and the temporary rcfile is cleaned up.
 - The `VERSION` file is the source of truth for the version. `make` stamps it into the binary
