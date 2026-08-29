@@ -68,7 +68,7 @@ func TestKeyboardCanBeLentAgain(t *testing.T) {
 // The handover ends when the shell offers a prompt again -- when whoever was
 // driving quit the editor -- and not on any clock.
 func TestHandOverEndsOnThePrompt(t *testing.T) {
-	s, _ := newRecordedScript(t, 0)
+	s, _ := newTestSession(t)
 	s.mon.marks = 1
 
 	restored := false
@@ -79,14 +79,14 @@ func TestHandOverEndsOnThePrompt(t *testing.T) {
 }
 
 func TestHandOverFailsWhenTheTerminalWont(t *testing.T) {
-	s, _ := newRecordedScript(t, 0)
+	s, _ := newTestSession(t)
 	s.raw = func() (func(), error) { return nil, errors.New("not a terminal") }
 
 	assert.Error(t, s.lendTerminal(0), "not a terminal")
 }
 
 func TestHandOverStopsWhenInterrupted(t *testing.T) {
-	s, _ := newRecordedScript(t, 0)
+	s, _ := newTestSession(t)
 	s.raw = func() (func(), error) { return func() {}, nil }
 	done := make(chan struct{})
 	close(done)
@@ -96,31 +96,40 @@ func TestHandOverStopsWhenInterrupted(t *testing.T) {
 	assert.ErrorIs(t, s.lendTerminal(0), errInterrupted)
 }
 
-// The armed line waits on the keyboard rather than the clock, and only that
-// line: the one after it goes back to the ordinary timed sync.
-func TestTypeAllHandsOverOnlyTheArmedLine(t *testing.T) {
-	s, rec := newRecordedScript(t, 0)
-	s.commands = []command{handover{}, newShell("nano f"), newShell("echo after")}
-	s.wait = 0
+// The handed-over command waits on the keyboard rather than the clock, and
+// only that one: the command after it goes back to the ordinary timed sync.
+func TestTypeAllHandsOverOnlyTheMarkedCommand(t *testing.T) {
+	s, rec := newTestSession(t)
 	s.cmdTimeout = time.Minute
 	s.mon.head = []byte("nano f")
+	promptsOnEnter(s, rec)
 
 	lent := 0
 	s.raw = func() (func(), error) { lent++; return func() {}, nil }
 
-	// The shell only comes back to a prompt once the whole line has been typed.
-	rec.onWrite = func(p string) {
-		if p == "\n" {
-			s.mon.mu.Lock()
-			s.mon.marks++
-			s.mon.mu.Unlock()
-		}
-	}
-
-	assert.NoError(t, s.typeAll(0))
+	nano := cmd("nano f")
+	nano.handover = true
+	assert.NoError(t, s.typeAll(&script{commands: []command{nano, cmd("echo after")}}, 0))
 	assert.EqualArrays(t, typedLines(rec), []string{"nano f\n", "echo after\n"})
 	assert.Equal(t, lent, 1)
-	assert.That(t, !s.armed, "the arming should be spent")
+	assert.ContainsString(t, warnings(s), "yours")
+}
+
+// A multi-line command is handed over once all of it is typed; its earlier
+// lines sit at PS2 and are waited on like any other.
+func TestTypeAllHandsOverAfterTheLastLine(t *testing.T) {
+	s, rec := newTestSession(t)
+	s.cmdTimeout = time.Minute
+	s.mon.head = []byte("python3 \\")
+	promptsOnEnter(s, rec)
+
+	lentAfter := -1
+	s.raw = func() (func(), error) { lentAfter = len(rec.events); return func() {}, nil }
+
+	assert.NoError(t, s.typeAll(&script{commands: []command{
+		{lines: []string{"python3 \\", "  -q"}, handover: true},
+	}}, 0))
+	assert.Equal(t, lentAfter, len(rec.events), "should be lent only once everything is typed")
 }
 
 // syncWriter is a bytes.Buffer safe to read from one goroutine while the

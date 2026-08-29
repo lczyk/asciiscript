@@ -1,146 +1,142 @@
 package main
 
 import (
-	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/lczyk/assert"
 )
 
+// typed flattens a script back to the lines it would type, in order.
+func typed(s *script) []string {
+	var lines []string
+	for _, c := range s.commands {
+		lines = append(lines, c.lines...)
+	}
+	return lines
+}
+
 func TestParseScriptCommands(t *testing.T) {
-	s, err := parseScript("echo hi\n#$ delay 100\n#$ wait 250\necho bye")
+	s, err := parseScript("echo hi\n#$ delay 100\n#$ pause 250\necho bye")
 	assert.NoError(t, err)
-	assert.Len(t, s.commands, 4)
-
-	sh, ok := s.commands[0].(shell)
-	assert.That(t, ok, "command 0 should be a shell")
-	assert.Equal(t, sh.cmd, "echo hi\n")
-
-	d, ok := s.commands[1].(setDelay)
-	assert.That(t, ok, "command 1 should be a setDelay")
-	assert.Equal(t, d.d, 100*time.Millisecond)
-
-	w, ok := s.commands[2].(setWait)
-	assert.That(t, ok, "command 2 should be a setWait")
-	assert.Equal(t, w.d, 250*time.Millisecond)
-
-	sh2, ok := s.commands[3].(shell)
-	assert.That(t, ok, "command 3 should be a shell")
-	assert.Equal(t, sh2.cmd, "echo bye\n")
+	assert.Len(t, s.commands, 2)
+	assert.EqualArrays(t, s.commands[0].lines, []string{"echo hi"})
+	assert.EqualArrays(t, s.commands[1].lines, []string{"echo bye"})
+	assert.Equal(t, s.commands[1].delay, 100*time.Millisecond)
+	assert.Equal(t, s.commands[1].pause, 250*time.Millisecond)
 }
 
 func TestParseScriptDefaults(t *testing.T) {
 	s, err := parseScript("echo hi")
 	assert.NoError(t, err)
-	assert.Equal(t, s.delay, 40*time.Millisecond)
-	assert.Equal(t, s.wait, 100*time.Millisecond)
+	assert.Equal(t, s.commands[0].delay, defaultDelay)
+	assert.Equal(t, s.commands[0].pause, time.Duration(0))
+	assert.That(t, !s.commands[0].handover, "nothing to hand over")
+	assert.Equal(t, s.pause, time.Duration(0))
 }
 
-func TestParseScriptSkipsBlankLines(t *testing.T) {
-	s, err := parseScript("echo a\n\n\necho b\n")
+// A control line is for the one command after it. The command after that is
+// back on the defaults, whatever the script set earlier.
+func TestParseScriptCtrlIsNotSticky(t *testing.T) {
+	s, err := parseScript("#$ delay 100\n#$ pause 250\n#$ handover\na\nb\n")
 	assert.NoError(t, err)
 	assert.Len(t, s.commands, 2)
+
+	a, b := s.commands[0], s.commands[1]
+	assert.Equal(t, a.delay, 100*time.Millisecond)
+	assert.Equal(t, a.pause, 250*time.Millisecond)
+	assert.That(t, a.handover, "a should be handed over")
+	assert.Equal(t, b.delay, defaultDelay)
+	assert.Equal(t, b.pause, time.Duration(0))
+	assert.That(t, !b.handover, "b should not be")
 }
 
-func TestNewShellAppendsNewline(t *testing.T) {
-	assert.Equal(t, newShell("echo hi").cmd, "echo hi\n")
-	assert.Equal(t, newShell("echo hi\n").cmd, "echo hi\n")
-}
-
-// A control line is words, however they are spaced: a second space or a tab
-// before the number is not a missing argument.
-func TestParseScriptCtrlLooseSpacing(t *testing.T) {
-	s, err := parseScript("#$  delay \t 100  \n#$wait 5")
+// Blank lines between commands are formatting, whitespace-only ones included,
+// and a control line still finds its command across them.
+func TestParseScriptSkipsBlankLines(t *testing.T) {
+	s, err := parseScript("echo a\n\n  \t \n#$ delay 10\n\necho b\n")
 	assert.NoError(t, err)
-	assert.Equal(t, assert.Type[setDelay](t, s.commands[0]).d, 100*time.Millisecond)
-	assert.Equal(t, assert.Type[setWait](t, s.commands[1]).d, 5*time.Millisecond)
+	assert.EqualArrays(t, typed(s), []string{"echo a", "echo b"})
+	assert.Equal(t, s.commands[1].delay, 10*time.Millisecond)
+}
+
+// A control line is words, however they are spaced or indented: a second space
+// or a tab before the number is not a missing argument.
+func TestParseScriptCtrlLooseSpacing(t *testing.T) {
+	for _, text := range []string{
+		"#$ delay 100\na",
+		"#$   delay 100\na",
+		"#$ delay     100\na",
+		"#$\tdelay\t100\t\na",
+		"#$delay 100\na",
+		"   #$ delay 100\na",
+	} {
+		s, err := parseScript(text)
+		assert.NoError(t, err, text)
+		assert.Equal(t, s.commands[0].delay, 100*time.Millisecond, text)
+	}
 }
 
 func TestParseScriptUnknownCtrl(t *testing.T) {
-	_, err := parseScript("#$ bogus 1")
+	_, err := parseScript("#$ bogus 1\na")
 	assert.ErrorIs(t, err, errUnknownCtrl)
+	assert.Error(t, err, "line 1")
 }
 
 func TestParseScriptCtrlNoArgs(t *testing.T) {
-	_, err := parseScript("#$ delay")
+	_, err := parseScript("#$ delay\na")
 	assert.ErrorIs(t, err, errNoArgs)
 }
 
 func TestParseScriptCtrlBadArg(t *testing.T) {
-	_, err := parseScript("#$ wait abc")
+	_, err := parseScript("a\n#$ pause abc\nb")
 	assert.ErrorIs(t, err, errBadArg)
+	assert.Error(t, err, "line 2")
 }
 
-// Each pause belongs to the gap *before* its keystroke, so shell.Run must wait
-// it out and only then write. Typing first would shift every digraph and
-// word-boundary pause one key late.
-func TestShellRunWaitsBeforeEachKeystroke(t *testing.T) {
-	s, rec := newRecordedScript(t, 40*time.Millisecond)
-	plan := newJitter(1, 7).plan("ab\n", 40*time.Millisecond)
-
-	assert.NoError(t, newShell("ab").run(s))
-
-	assert.EqualArrays(t, rec.events, []string{
-		"s:" + plan[0].pause.String(), "w:a",
-		"s:" + plan[1].pause.String(), "w:b",
-		"s:" + plan[2].pause.String(), "w:\n",
-	})
-}
-
-func TestShellRunReturnsWriteError(t *testing.T) {
-	s, rec := newRecordedScript(t, 0)
-	rec.err = errors.New("pty is gone")
-
-	err := newShell("echo hi").run(s)
-	assert.Error(t, err, "writing to pty failed")
-}
-
-// An interrupted sleep aborts typing rather than finishing the line.
-func TestShellRunStopsWhenInterrupted(t *testing.T) {
-	s, _ := newRecordedScript(t, 0)
-	done := make(chan struct{})
-	close(done)
-	s.done = done
-	s.sleep = s.realSleep
-
-	assert.ErrorIs(t, newShell("echo hi").run(s), errInterrupted)
-}
-
-func TestScriptWaitInterrupted(t *testing.T) {
-	s, err := parseScript("")
+// A pause at the end of the script holds the last prompt before the session
+// is ended. The other two have nothing to apply to, which is a mistake worth
+// hearing about rather than a line silently ignored.
+func TestParseScriptTrailingCtrl(t *testing.T) {
+	s, err := parseScript("echo hi\n#$ pause 1000\n")
 	assert.NoError(t, err)
-	done := make(chan struct{})
-	close(done)
-	s.done = done
+	assert.Equal(t, s.pause, time.Second)
+	assert.Len(t, s.commands, 1)
 
-	assert.ErrorIs(t, s.realSleep(time.Hour), errInterrupted)
-	assert.ErrorIs(t, s.realSleep(0), errInterrupted)
-	assert.NoError(t, (&script{}).realSleep(0))
+	_, err = parseScript("echo hi\n#$ delay 10\n")
+	assert.ErrorIs(t, err, errDangling)
+	assert.Error(t, err, "line 2")
+
+	_, err = parseScript("echo hi\n\n#$ handover\n\n")
+	assert.ErrorIs(t, err, errDangling)
+	assert.Error(t, err, "line 3")
+
+	_, err = parseScript("#$ pause 5\n#$ delay 10\n")
+	assert.ErrorIs(t, err, errDangling)
 }
 
 // Blank lines are script formatting between commands, but heredoc content is
 // literal -- dropping a blank line there changes what the recorded shell reads.
-func TestParseScriptKeepsHeredocBlankLines(t *testing.T) {
-	s, err := parseScript("cat <<EOF > out.txt\nline one\n\nline three\nEOF\necho done\n")
+func TestParseScriptHeredocIsOneCommand(t *testing.T) {
+	s, err := parseScript("#$ delay 10\ncat <<EOF > out.txt\nline one\n\nline three\nEOF\necho done\n")
 	assert.NoError(t, err)
-
-	var typed []string
-	for _, c := range s.commands {
-		typed = append(typed, assert.Type[shell](t, c).cmd)
-	}
-	assert.EqualArrays(t, typed, []string{
-		"cat <<EOF > out.txt\n", "line one\n", "\n", "line three\n", "EOF\n", "echo done\n",
+	assert.Len(t, s.commands, 2)
+	assert.EqualArrays(t, s.commands[0].lines, []string{
+		"cat <<EOF > out.txt", "line one", "", "line three", "EOF",
 	})
+	assert.Equal(t, s.commands[0].delay, 10*time.Millisecond)
+	assert.EqualArrays(t, s.commands[1].lines, []string{"echo done"})
 }
 
 // Control lines inside a heredoc are content, not commands.
 func TestParseScriptHeredocSwallowsCtrlLines(t *testing.T) {
-	s, err := parseScript("cat <<EOF\n#$ delay 100\nEOF\n#$ delay 100\n")
+	s, err := parseScript("cat <<EOF\n#$ delay 100\nEOF\n#$ delay 100\necho after\n")
 	assert.NoError(t, err)
-	assert.Len(t, s.commands, 4)
-	assert.Equal(t, assert.Type[shell](t, s.commands[1]).cmd, "#$ delay 100\n")
-	assert.Equal(t, assert.Type[setDelay](t, s.commands[3]).d, 100*time.Millisecond)
+	assert.Len(t, s.commands, 2)
+	assert.EqualArrays(t, s.commands[0].lines, []string{"cat <<EOF", "#$ delay 100", "EOF"})
+	assert.Equal(t, s.commands[0].delay, defaultDelay)
+	assert.Equal(t, s.commands[1].delay, 100*time.Millisecond)
 }
 
 func TestHeredocDelim(t *testing.T) {
@@ -159,6 +155,8 @@ func TestHeredocDelim(t *testing.T) {
 		{"echo 'a << b'", "", false},
 		{`echo "a << b"`, "", false},
 		{`echo "quoted" <<EOF`, "EOF", false},
+		{"echo hi # cat <<EOF", "", false}, // a comment
+		{`echo \"a <<EOF`, "EOF", false},   // the escaped quote opens nothing
 	} {
 		delim, dash := heredocDelim(tc.line)
 		assert.Equal(t, delim, tc.delim, tc.line)
@@ -170,8 +168,8 @@ func TestHeredocDelim(t *testing.T) {
 func TestParseScriptHeredocDashTerminator(t *testing.T) {
 	s, err := parseScript("cat <<-EOF\n\tbody\n\tEOF\necho after\n")
 	assert.NoError(t, err)
-	assert.Len(t, s.commands, 4)
-	assert.Equal(t, assert.Type[shell](t, s.commands[3]).cmd, "echo after\n")
+	assert.Len(t, s.commands, 2)
+	assert.EqualArrays(t, s.commands[1].lines, []string{"echo after"})
 }
 
 // A `<<` inside quotes must not open a heredoc -- doing so would swallow the
@@ -179,33 +177,127 @@ func TestParseScriptHeredocDashTerminator(t *testing.T) {
 func TestParseScriptIgnoresQuotedHeredocMarker(t *testing.T) {
 	s, err := parseScript("echo \"write <<EOF to start one\"\n\necho after\n")
 	assert.NoError(t, err)
+	assert.EqualArrays(t, typed(s), []string{"echo \"write <<EOF to start one\"", "echo after"})
+}
+
+// A line ending in a backslash continues on the next one, and bash reads
+// everything there literally -- a "#$" line is typed, and a blank line is how
+// the continuation ends.
+func TestParseScriptBackslashContinuation(t *testing.T) {
+	s, err := parseScript("#$ delay 10\necho one \\\n  two \\\n#$ three\n\necho after\n")
+	assert.NoError(t, err)
 	assert.Len(t, s.commands, 2)
-	assert.Equal(t, assert.Type[shell](t, s.commands[1]).cmd, "echo after\n")
+	assert.EqualArrays(t, s.commands[0].lines, []string{"echo one \\", "  two \\", "#$ three"})
+	assert.Equal(t, s.commands[0].delay, 10*time.Millisecond)
+	assert.EqualArrays(t, s.commands[1].lines, []string{"echo after"})
+
+	s, err = parseScript("echo one \\\n\necho after\n")
+	assert.NoError(t, err)
+	assert.EqualArrays(t, s.commands[0].lines, []string{"echo one \\", ""})
+	assert.EqualArrays(t, s.commands[1].lines, []string{"echo after"})
+}
+
+// An escaped backslash at the end of a line is a backslash, not a continuation;
+// one inside single quotes is text; one in a comment is nothing.
+func TestParseScriptBackslashThatDoesNotContinue(t *testing.T) {
+	for _, text := range []string{
+		"echo a \\\\\necho b\n",
+		"echo 'a\\'\necho b\n",
+		"echo a # \\\necho b\n",
+	} {
+		s, err := parseScript(text)
+		assert.NoError(t, err, text)
+		assert.Len(t, s.commands, 2, text)
+	}
+}
+
+// A quote left open runs the command on to the line that closes it.
+func TestParseScriptOpenQuoteContinuation(t *testing.T) {
+	s, err := parseScript("echo \"one\n\n#$ two\nthree\" && echo four\necho after\n")
+	assert.NoError(t, err)
+	assert.Len(t, s.commands, 2)
+	assert.EqualArrays(t, s.commands[0].lines, []string{"echo \"one", "", "#$ two", "three\" && echo four"})
+
+	s, err = parseScript("echo 'it''s\nfine' # \"\necho after\n")
+	assert.NoError(t, err)
+	assert.Len(t, s.commands, 2)
+}
+
+// A heredoc opened on a line that a quote continued onto is still a heredoc.
+func TestParseScriptHeredocAfterContinuation(t *testing.T) {
+	s, err := parseScript("echo \"a\nb\" && cat <<EOF\n\nEOF\necho after\n")
+	assert.NoError(t, err)
+	assert.Len(t, s.commands, 2)
+	assert.EqualArrays(t, s.commands[0].lines, []string{"echo \"a", "b\" && cat <<EOF", "", "EOF"})
+}
+
+// A command that never ends -- heredoc without its terminator, quote never
+// closed, backslash on the last line -- would hang the recording at PS2.
+func TestParseScriptUnterminated(t *testing.T) {
+	for _, text := range []string{
+		"cat <<EOF\nbody\n",
+		"echo \"open\n",
+		"echo one \\\n",
+		"echo one \\",
+	} {
+		_, err := parseScript(text)
+		assert.ErrorIs(t, err, errUnterminated, text)
+	}
+}
+
+func TestScanLine(t *testing.T) {
+	for _, tc := range []struct {
+		line      string
+		q         byte
+		quote     byte
+		backslash bool
+		literal   string // the line with every literal byte replaced by '_'
+	}{
+		{"echo hi", 0, 0, false, "echo hi"},
+		{"echo 'a b' c", 0, 0, false, "echo _____ c"},
+		{`echo "a b" c`, 0, 0, false, "echo _____ c"},
+		{`echo "a`, 0, '"', false, "echo __"},
+		{"b\" c", '"', 0, false, "__ c"},
+		{"echo 'a", 0, '\'', false, "echo __"},
+		{`echo "a\"b"`, 0, 0, false, "echo ______"},
+		{`echo \"a`, 0, 0, false, "echo \\\"a"},
+		{"echo a \\", 0, 0, true, "echo a \\"},
+		{"echo a \\\\", 0, 0, false, "echo a \\\\"},
+		{"echo 'a \\", 0, '\'', false, "echo ____"},
+		{"echo \"a \\", 0, '"', true, "echo ____"},
+		{"echo a # b \\", 0, 0, false, "echo a _____"},
+		{"# whole line \\", 0, 0, false, "______________"},
+		{"echo a#b \\", 0, 0, true, "echo a#b \\"},
+	} {
+		sc := scanLine(tc.line, tc.q)
+		assert.Equal(t, sc.quote, tc.quote, tc.line)
+		assert.Equal(t, sc.backslash, tc.backslash, tc.line)
+		var got strings.Builder
+		for i, lit := range sc.literal {
+			if lit {
+				got.WriteByte('_')
+			} else {
+				got.WriteByte(tc.line[i])
+			}
+		}
+		assert.Equal(t, got.String(), tc.literal, tc.line)
+	}
 }
 
 func TestParseScriptHandover(t *testing.T) {
 	s, err := parseScript("#$ handover - over to you\nnano f\n")
 	assert.NoError(t, err)
-	assert.Len(t, s.commands, 2)
-	assert.Type[handover](t, s.commands[0])
-	assert.Equal(t, assert.Type[shell](t, s.commands[1]).cmd, "nano f\n")
-}
-
-func TestHandoverArmsTheNextLine(t *testing.T) {
-	s, _ := newRecordedScript(t, 0)
-	assert.That(t, !s.armed, "nothing armed to start with")
-
-	assert.NoError(t, handover{}.run(s))
-	assert.That(t, s.armed, "the next line should be armed")
-	assert.ContainsString(t, warnings(s), "yours")
+	assert.Len(t, s.commands, 1)
+	assert.That(t, s.commands[0].handover, "should be handed over")
+	assert.EqualArrays(t, s.commands[0].lines, []string{"nano f"})
 }
 
 func TestScriptHasHandover(t *testing.T) {
-	with, err := parseScript("#$ handover\nnano f\n")
+	with, err := parseScript("echo hi\n#$ handover\nnano f\n")
 	assert.NoError(t, err)
 	assert.That(t, with.hasHandover(), "should spot the handover")
 
-	without, err := parseScript("#$ wait 10\necho hi\n")
+	without, err := parseScript("#$ pause 10\necho hi\n")
 	assert.NoError(t, err)
 	assert.That(t, !without.hasHandover(), "should not invent one")
 }

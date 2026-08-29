@@ -63,7 +63,7 @@ func (k *keyboard) lend(w io.Writer) func() {
 // command wants -- ctrl-o, ctrl-x, arrows -- reach it as themselves rather than
 // being buffered into lines or turned into signals, and stops the terminal
 // echoing input that the recorded session is already echoing back.
-func (s *script) rawStdin() (func(), error) {
+func (s *session) rawStdin() (func(), error) {
 	fd := int(os.Stdin.Fd())
 	prev, err := term.MakeRaw(fd)
 	if err != nil {
@@ -75,7 +75,7 @@ func (s *script) rawStdin() (func(), error) {
 // lendTerminal types nothing and waits for nobody: the person running the recording
 // drives the command that was just typed, and the script resumes when they land
 // back at a prompt. There is no deadline -- the wait is on a human.
-func (s *script) lendTerminal(before int) error {
+func (s *session) lendTerminal(before int) error {
 	restore, err := s.raw()
 	if err != nil {
 		return err

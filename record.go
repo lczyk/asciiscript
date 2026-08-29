@@ -200,12 +200,93 @@ func echoProbe(line string) string {
 	return string(r)
 }
 
+// session is a recording in progress: the pty asciinema is hosted in, the
+// timing model, the mirror of the session's output, and the seams that let
+// the tests drive all of it without a terminal.
+type session struct {
+	speed  float64         // typing-speed multiplier applied to the script's timing (1 = as written)
+	pty    io.WriteCloser  // pty master; keystrokes get written here
+	jitter *jitter         // plans the human-like keystroke timing
+	mon    *mirror         // asciinema's output, watched for our own keystrokes
+	done   <-chan struct{} // closed on SIGINT/SIGTERM
+
+	// cmdTimeout is how long a typed line gets to finish before typing carries
+	// on anyway.
+	cmdTimeout time.Duration
+	warn       io.Writer // where warnings go; never the pty, which is being recorded
+	keys       *keyboard // the real terminal's input, on loan during a handover
+
+	// raw puts the real terminal into raw mode for the duration of a handover
+	// and returns the undo. Tests swap it out for one without a terminal.
+	raw func() (func(), error)
+
+	// sleep waits between keystrokes and commands, giving up early if the run
+	// is interrupted. Tests swap it out to replay a script without waiting.
+	sleep func(time.Duration) error
+}
+
+func newSession() *session {
+	s := &session{
+		speed:  1,
+		jitter: newJitter(0, 0),
+		mon:    &mirror{},
+		warn:   os.Stderr,
+		keys:   &keyboard{in: os.Stdin},
+	}
+	s.sleep = s.realSleep
+	s.raw = s.rawStdin
+	return s
+}
+
+// realSleep is the default session.sleep: sleep d, or abort if a signal lands first.
+func (s *session) realSleep(d time.Duration) error {
+	if d <= 0 {
+		select {
+		case <-s.done:
+			return errInterrupted
+		default:
+			return nil
+		}
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-s.done:
+		return errInterrupted
+	case <-t.C:
+		return nil
+	}
+}
+
+// scaled applies --speed to a duration from the script (higher speed -> shorter).
+func (s *session) scaled(d time.Duration) time.Duration {
+	if s.speed > 0 {
+		return time.Duration(float64(d) / s.speed)
+	}
+	return d
+}
+
+// typeLine types a line and the newline that runs it, by replaying the timing
+// model's plan: sleep out each planned pause, then write its key. The pause
+// belongs before its keystroke -- that is the gap the model computed it for.
+func (s *session) typeLine(line string, delay, pause time.Duration) error {
+	for _, k := range s.jitter.plan(line+"\n", s.scaled(delay), s.scaled(pause)) {
+		if err := s.sleep(k.pause); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(s.pty, k.data); err != nil {
+			return fmt.Errorf("writing to pty failed: %w", err)
+		}
+	}
+	return nil
+}
+
 // confirmEcho waits for the first line typed to come back from the recorded
 // shell. asciinema doesn't forward input for a second or two after launch, so
 // too small a --settle means every keystroke lands in the void: the recording
-// comes out empty and `exit` never arrives either. Checking the first line
-// turns that into an error instead of a silent take.
-func (s *script) confirmEcho(line string, settle time.Duration) error {
+// comes out empty and the shell never gets told to end either. Checking the
+// first line turns that into an error instead of a silent take.
+func (s *session) confirmEcho(line string, settle time.Duration) error {
 	probe := echoProbe(line)
 	if probe == "" {
 		return nil
@@ -231,13 +312,13 @@ func (s *script) confirmEcho(line string, settle time.Duration) error {
 // pager, anything reading stdin -- can't be waited for, because the input that
 // would end it is the input being held back. Those run the timeout out, say so,
 // and get typed over anyway.
-func (s *script) syncPrompt(line string, before int) error {
+func (s *session) syncPrompt(line string, before int) error {
 	deadline := time.Now().Add(s.cmdTimeout)
 	for s.mon.marked() <= before {
 		if time.Now().After(deadline) {
 			fmt.Fprintf(s.warn,
 				"asciiscript: %q hasn't finished after %s -- typing on regardless; if it holds the terminal (an editor, a pager) put `#$ handover` in front of it\n",
-				strings.TrimSuffix(line, "\n"), s.cmdTimeout)
+				line, s.cmdTimeout)
 			return nil
 		}
 		if err := s.sleep(syncPoll); err != nil {
@@ -247,77 +328,65 @@ func (s *script) syncPrompt(line string, before int) error {
 	return nil
 }
 
-// typeAll gives asciinema time to warm up, then runs every parsed command in
-// order, waiting for each to finish and then pausing before the next. The shell
-// prints its prompt almost immediately, but asciinema doesn't start forwarding
-// keystrokes to it for ~1-2s after launch -- type sooner and the first commands
-// land in the void and never make it into the recording. Watching for the
-// prompt doesn't help (it shows up long before input forwarding is live), so
-// the settle is a plain fixed wait and confirmEcho checks afterwards that it was
-// long enough.
-func (s *script) typeAll(settle time.Duration) error {
+// typeAll gives asciinema time to warm up, then types every command in order,
+// each line waited on before the next. The shell prints its prompt almost
+// immediately, but asciinema doesn't start forwarding keystrokes to it for
+// ~1-2s after launch -- type sooner and the first commands land in the void and
+// never make it into the recording. Watching for the prompt doesn't help (it
+// shows up long before input forwarding is live), so the settle is a plain
+// fixed wait and confirmEcho checks afterwards that it was long enough.
+func (s *session) typeAll(sc *script, settle time.Duration) error {
 	if err := s.sleep(settle); err != nil {
 		return err
 	}
-	typed := false
-	for _, c := range s.commands {
-		sh, typing := c.(shell)
-
-		// A control line is a note to asciiscript, not something the recorded
-		// shell ever sees: it is never typed and never finishes, so it earns
-		// no pause of its own. Because the pause belongs to the line it
-		// precedes, `#$ wait N` takes effect on the very next line -- which is
-		// where a script puts it to slow something down.
-		if !typing {
-			if err := c.run(s); err != nil {
+	for i, c := range sc.commands {
+		if c.handover {
+			fmt.Fprintln(s.warn, "asciiscript: the next command is yours -- the script picks up again once it drops you back at a prompt")
+		}
+		for j, line := range c.lines {
+			// The pause the script asked for goes before the command, so
+			// before its first line only; the rest get the model's line gap.
+			var pause time.Duration
+			if j == 0 {
+				pause = c.pause
+			}
+			before := s.mon.marked()
+			if err := s.typeLine(line, c.delay, pause); err != nil {
 				return err
 			}
-			continue
-		}
-		if typed {
-			if err := s.sleep(s.wait); err != nil {
+			if i == 0 && j == 0 {
+				if err := s.confirmEcho(line, settle); err != nil {
+					return err
+				}
+			}
+			var err error
+			if c.handover && j == len(c.lines)-1 {
+				err = s.lendTerminal(before)
+			} else {
+				err = s.syncPrompt(line, before)
+			}
+			if err != nil {
 				return err
 			}
-		}
-
-		before := s.mon.marked()
-		if err := c.run(s); err != nil {
-			return err
-		}
-		if !typed {
-			typed = true
-			if err := s.confirmEcho(sh.cmd, settle); err != nil {
-				return err
-			}
-		}
-
-		var err error
-		if s.armed {
-			s.armed = false
-			err = s.lendTerminal(before)
-		} else {
-			err = s.syncPrompt(sh.cmd, before)
-		}
-		if err != nil {
-			return err
 		}
 	}
-	// One last pause, so the closing output gets a beat before `exit` lands.
-	if typed {
-		return s.sleep(s.wait)
+	// A trailing pause holds the last prompt before the session is ended.
+	if sc.pause > 0 {
+		return s.sleep(s.jitter.linePause(0, s.scaled(sc.pause)))
 	}
 	return nil
 }
 
 // finish ends the recorded session and waits for asciinema to flush the .cast.
-// `exit` is only bytes on the pty: whatever holds the terminal's input at that
-// moment eats them, so a pager, an unterminated quote or any command still
-// reading stdin leaves the shell alive and the wait unbounded. Hence the
-// deadline and the kill behind it.
+// The shell is sent end-of-input rather than a typed `exit`, so the recording
+// ends the way a session does. It is only a byte on the pty, though: whatever
+// holds the terminal's input at that moment eats it, so a pager, an
+// unterminated quote or any command still reading stdin leaves the shell alive
+// and the wait unbounded. Hence the deadline and the kill behind it.
 func finish(cmd *exec.Cmd, w io.Writer, timeout time.Duration) error {
 	// A failed write means the pty is already gone, so there is nothing left to
-	// exit -- but asciinema still has to be reaped rather than left behind.
-	_, werr := io.WriteString(w, "exit\n")
+	// end -- but asciinema still has to be reaped rather than left behind.
+	_, werr := io.WriteString(w, "\x04")
 
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()
@@ -328,7 +397,7 @@ func finish(cmd *exec.Cmd, w io.Writer, timeout time.Duration) error {
 	case err := <-waited:
 		switch {
 		case werr != nil:
-			return fmt.Errorf("couldn't send exit: %w", werr)
+			return fmt.Errorf("couldn't end the session: %w", werr)
 		case err != nil:
 			return fmt.Errorf("asciinema exited with error: %w", err)
 		}
@@ -336,14 +405,15 @@ func finish(cmd *exec.Cmd, w io.Writer, timeout time.Duration) error {
 	case <-t.C:
 		_ = cmd.Process.Kill()
 		<-waited
-		return fmt.Errorf("asciinema didn't stop within %s of `exit` -- the script probably left something holding the terminal (a pager, an unterminated quote, an interactive command)", timeout)
+		return fmt.Errorf("asciinema didn't stop within %s of the session being ended -- the script probably left something holding the terminal (a pager, an unterminated quote, an interactive command)", timeout)
 	}
 }
 
-// Run records the script to outfile by hosting `asciinema rec` inside a pty and
-// injecting keystrokes into it. asciinema sees a real terminal, so it runs
+// record records the script to outfile by hosting `asciinema rec` inside a pty
+// and injecting keystrokes into it. asciinema sees a real terminal, so it runs
 // interactively and forwards our keystrokes to the shell it records.
-func (s *script) record(o *options) error {
+func record(sc *script, o *options) error {
+	s := newSession()
 	if o.Speed <= 0 {
 		return fmt.Errorf("--speed must be greater than 0 (got %g)", o.Speed)
 	}
@@ -361,7 +431,7 @@ func (s *script) record(o *options) error {
 	if o.ExitTimeout <= 0 {
 		return fmt.Errorf("--exit-timeout must be greater than 0 (got %d)", o.ExitTimeout)
 	}
-	handover := s.hasHandover()
+	handover := sc.hasHandover()
 	if err := checkHandover(handover, o); err != nil {
 		return err
 	}
@@ -427,7 +497,7 @@ func (s *script) record(o *options) error {
 	s.mon.quiet = o.Quiet
 	go s.mon.run(ptmx)
 
-	typed := s.typeAll(time.Duration(o.Settle) * time.Millisecond)
+	typed := s.typeAll(sc, time.Duration(o.Settle)*time.Millisecond)
 
 	// Stop the recording either way: on an interrupt or a half-typed script,
 	// asciinema still has to be told to stop and flush what it has.

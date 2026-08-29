@@ -3,9 +3,9 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -14,55 +14,130 @@ import (
 // ctrlPrefix marks a control line in a script, e.g. "#$ delay 100".
 const ctrlPrefix = "#$"
 
+// defaultDelay is the per-keystroke delay a command types at unless a
+// `#$ delay` in front of it says otherwise.
+const defaultDelay = 40 * time.Millisecond
+
 var (
-	errUnknownCtrl = errors.New("unknown control command")
-	errNoArgs      = errors.New("no arguments given to command")
-	errBadArg      = errors.New("invalid command argument")
-	errInterrupted = errors.New("interrupted")
+	errUnknownCtrl  = errors.New("unknown control command")
+	errNoArgs       = errors.New("no arguments given to command")
+	errBadArg       = errors.New("invalid command argument")
+	errDangling     = errors.New("control line with no command after it to apply to")
+	errUnterminated = errors.New("command runs past the end of the script")
+	errInterrupted  = errors.New("interrupted")
 )
 
-// command is an action to be run against a running script.
-type command interface {
-	run(*script) error
+// command is one shell command -- the lines it spans, and how to type it.
+// Control lines set the timing of the one command that follows them, and only
+// that one; a command with none in front of it gets the defaults.
+type command struct {
+	lines    []string      // physical lines, typed one after another
+	delay    time.Duration // between keystrokes
+	pause    time.Duration // before the first keystroke; zero for the timing model's own line gap
+	handover bool          // hand the terminal over once the last line is typed
 }
 
-// shell is a line of input to type into the recorded shell.
-type shell struct {
-	cmd string
+// script is a parsed script: the commands to type in order, and how long to
+// hold the last prompt before the session is ended.
+type script struct {
+	commands []command
+	pause    time.Duration // a trailing `#$ pause`
 }
 
-// newShell creates a new shell, ensuring the line ends in a newline so it runs.
-func newShell(cmd string) shell {
-	if !strings.HasSuffix(cmd, "\n") {
-		cmd += "\n"
+// hasHandover reports whether the script hands the terminal over at any point.
+func (s *script) hasHandover() bool {
+	return slices.ContainsFunc(s.commands, func(c command) bool { return c.handover })
+}
+
+// loadScript parses a script from the file at path.
+func loadScript(path string) (*script, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
-	return shell{cmd: cmd}
+	return parseScript(string(b))
 }
 
-// Run types the command by replaying the jitter subsystem's keystroke plan:
-// wait out the planned pause, then write the bytes. The pause belongs before
-// its keystroke -- that is the gap the timing model computed it for.
-func (s shell) run(sc *script) error {
-	for _, k := range sc.jitter.plan(s.cmd, sc.base()) {
-		if err := sc.sleep(k.pause); err != nil {
-			return err
-		}
-		if _, err := io.WriteString(sc.pty, k.data); err != nil {
-			return fmt.Errorf("writing to pty failed: %w", err)
-		}
+// parseScript parses a script from raw script text.
+//
+// A command normally is one line. It runs on while a heredoc is open, while a
+// quote is open, or after a line ending in a backslash -- and inside one every
+// line is literal, blank lines and "#$" lines included, because bash will read
+// them as part of the command. Between commands, blank lines are skipped and
+// control lines are collected for the next command to be typed.
+func parseScript(text string) (*script, error) {
+	lines := strings.Split(text, "\n")
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1] // the newline the file ends with, not a blank line
 	}
-	return nil
+
+	s := &script{}
+	next := command{delay: defaultDelay} // what the control lines so far have asked of the next command
+	delaySet, ctrlAt := false, 0         // ctrlAt is the last control line's number; 0 when none is pending
+	var cont continuation
+
+	for i, raw := range lines {
+		if cont.open() {
+			last := &s.commands[len(s.commands)-1]
+			last.lines = append(last.lines, raw)
+			cont.feed(raw)
+			continue
+		}
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(line, ctrlPrefix); ok {
+			kind, d, err := parseCtrl(rest)
+			if err != nil {
+				return nil, fmt.Errorf("%w (line %d)", err, i+1)
+			}
+			switch kind {
+			case "delay":
+				next.delay, delaySet = d, true
+			case "pause":
+				next.pause = d
+			case "handover":
+				next.handover = true
+			}
+			ctrlAt = i + 1
+			continue
+		}
+		next.lines = []string{raw}
+		s.commands = append(s.commands, next)
+		next, delaySet, ctrlAt = command{delay: defaultDelay}, false, 0
+		cont = continuation{}
+		cont.feed(raw)
+	}
+
+	if cont.open() {
+		return nil, fmt.Errorf("%w (line %d)", errUnterminated, len(lines))
+	}
+	// With nothing left to type, a pause still means something: hold the last
+	// prompt that long before the session is ended. The others don't.
+	if delaySet || next.handover {
+		return nil, fmt.Errorf("%w (line %d)", errDangling, ctrlAt)
+	}
+	s.pause = next.pause
+	return s, nil
 }
 
-// setWait changes the pause between subsequent commands.
-type setWait struct{ d time.Duration }
-
-func (w setWait) run(s *script) error { s.wait = w.d; return nil }
-
-// setDelay changes the typing speed (interval between keystrokes) of subsequent commands.
-type setDelay struct{ d time.Duration }
-
-func (d setDelay) run(s *script) error { s.delay = d.d; return nil }
+// parseCtrl parses the text after a control line's "#$".
+func parseCtrl(text string) (kind string, d time.Duration, err error) {
+	tokens := strings.Fields(text)
+	if len(tokens) == 0 {
+		return "", 0, errUnknownCtrl
+	}
+	switch kind = tokens[0]; kind {
+	case "delay", "pause":
+		d, err = millis(tokens[1:])
+		return kind, d, err
+	case "handover":
+		return kind, 0, nil
+	default:
+		return "", 0, errUnknownCtrl
+	}
+}
 
 // millis parses a control command's single argument, in milliseconds.
 func millis(opts []string) (time.Duration, error) {
@@ -76,171 +151,101 @@ func millis(opts []string) (time.Duration, error) {
 	return time.Millisecond * time.Duration(ms), nil
 }
 
-// handover gives the next line to whoever is running the recording: it gets
-// typed as usual, and then the real keyboard is wired to the recorded session
-// until the command they were handed ends. For the commands nothing else can
-// drive -- an editor, a REPL, anything wanting a keypress -- and the session
-// records what they do exactly as if it had been typed by the script.
-type handover struct{}
-
-func (h handover) run(s *script) error {
-	s.armed = true
-	fmt.Fprintln(s.warn, "asciiscript: the next command is yours -- the script picks up again once it drops you back at a prompt")
-	return nil
+// continuation tracks whether the command being read is still going: inside a
+// heredoc, with a quote left open, or after a line ending in a backslash.
+type continuation struct {
+	heredoc   string // delimiter of the open heredoc, if any
+	dash      bool   // the `<<-` form: the delimiter may be indented with tabs
+	quote     byte   // the open quote, if any
+	backslash bool   // the last line ended in an unescaped backslash
 }
 
-// newCtrl parses a control command (the text after the "#$" prefix).
-func newCtrl(cmd string) (command, error) {
-	tokens := strings.Fields(cmd)
-	if len(tokens) == 0 {
-		return nil, errUnknownCtrl
-	}
-	switch tokens[0] {
-	case "delay":
-		d, err := millis(tokens[1:])
-		return setDelay{d}, err
-	case "wait":
-		d, err := millis(tokens[1:])
-		return setWait{d}, err
-	case "handover":
-		return handover{}, nil
-	default:
-		return nil, errUnknownCtrl
-	}
+func (c *continuation) open() bool {
+	return c.heredoc != "" || c.quote != 0 || c.backslash
 }
 
-// script is a parsed sequence of commands to type into a recorded session.
-type script struct {
-	commands []command
-	delay    time.Duration // between keystrokes
-	wait     time.Duration // between commands
-
-	speed  float64         // typing-speed multiplier applied to delay (1 = as written)
-	pty    io.WriteCloser  // pty master; keystrokes get written here
-	jitter *jitter         // plans the human-like keystroke timing
-	mon    *mirror         // asciinema's output, watched for our own keystrokes
-	done   <-chan struct{} // closed on SIGINT/SIGTERM
-
-	// cmdTimeout is how long a typed line gets to finish before typing carries
-	// on anyway.
-	cmdTimeout time.Duration
-	warn       io.Writer // where warnings go; never the pty, which is being recorded
-
-	keys  *keyboard // the real terminal's input, on loan during a handover
-	armed bool      // set by `#$ handover`, spent by the next line typed
-
-	// raw puts the real terminal into raw mode for the duration of a handover
-	// and returns the undo. Tests swap it out for one without a terminal.
-	raw func() (func(), error)
-
-	// sleep waits between keystrokes and commands, giving up early if the run
-	// is interrupted. Tests swap it out to replay a script without waiting.
-	sleep func(time.Duration) error
-}
-
-// realSleep is the default script.sleep: sleep d, or abort if a signal lands first.
-func (s *script) realSleep(d time.Duration) error {
-	if d <= 0 {
-		select {
-		case <-s.done:
-			return errInterrupted
-		default:
-			return nil
+// feed reads one more line of the command.
+func (c *continuation) feed(line string) {
+	if c.heredoc != "" {
+		term := line
+		if c.dash {
+			term = strings.TrimLeft(term, "\t")
 		}
+		if term == c.heredoc {
+			c.heredoc = ""
+		}
+		return
 	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-s.done:
-		return errInterrupted
-	case <-t.C:
-		return nil
+	sc := scanLine(line, c.quote)
+	c.quote, c.backslash = sc.quote, sc.backslash
+	if c.quote == 0 {
+		c.heredoc, c.dash = heredocIn(line, sc.literal)
 	}
 }
 
-// base is the effective per-keystroke delay: the current delay scaled by the
-// speed multiplier (higher speed -> shorter delay).
-func (s *script) base() time.Duration {
-	if s.speed > 0 {
-		return time.Duration(float64(s.delay) / s.speed)
-	}
-	return s.delay
+// lineScan is what scanLine makes of a line of shell.
+type lineScan struct {
+	literal   []bool // per byte: text rather than syntax -- inside quotes, or in a comment
+	quote     byte   // the quote still open at the end of the line, if any
+	backslash bool   // the line ends in an unescaped backslash
 }
 
-// loadScript parses a script from the file at path.
-func loadScript(path string) (*script, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return parseScript(string(b))
-}
-
-// parseScript parses a script from raw script text.
-func parseScript(text string) (*script, error) {
-	s := &script{
-		delay: time.Millisecond * 40,
-		wait:  time.Millisecond * 100,
-		speed: 1.0,
-		mon:   &mirror{},
-		warn:  os.Stderr,
-		keys:  &keyboard{in: os.Stdin},
-	}
-	s.sleep = s.realSleep
-	s.raw = s.rawStdin
-
-	lines := strings.Split(text, "\n")
-	if n := len(lines); n > 0 && lines[n-1] == "" {
-		lines = lines[:n-1] // the newline the file ends with, not a blank line
-	}
-
-	// Inside a heredoc every line is literal input for the command that opened
-	// it -- blank lines included, "#$" lines included -- so the usual skipping
-	// and control-line parsing is suspended until the delimiter shows up.
-	var heredoc string
-	var heredocDash bool
-
-	for i, line := range lines {
-		if heredoc != "" {
-			s.commands = append(s.commands, newShell(line))
-			term := line
-			if heredocDash {
-				term = strings.TrimLeft(term, "\t")
+// scanLine walks a line of shell starting inside quote q (0 for none),
+// tracking quotes and backslash escapes the way bash reads them. An unquoted
+// `#` at a word start begins a comment, which runs to the end of the line.
+func scanLine(line string, q byte) lineScan {
+	lit := make([]bool, len(line))
+	esc := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case esc:
+			esc = false
+			lit[i] = q != 0
+		case q == '\'':
+			lit[i] = true
+			if c == '\'' {
+				q = 0
 			}
-			if term == heredoc {
-				heredoc = ""
+		case q == '"':
+			lit[i] = true
+			switch c {
+			case '"':
+				q = 0
+			case '\\':
+				esc = true
 			}
-			continue
-		}
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, ctrlPrefix) {
-			ctrl, err := newCtrl(strings.TrimSpace(line[len(ctrlPrefix):]))
-			if err != nil {
-				return nil, fmt.Errorf("%w (line %d)", err, i+1)
+		case c == '\\':
+			esc = true
+		case c == '\'' || c == '"':
+			lit[i] = true
+			q = c
+		case c == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t'):
+			for ; i < len(line); i++ {
+				lit[i] = true
 			}
-			s.commands = append(s.commands, ctrl)
-			continue
+			return lineScan{literal: lit, quote: q}
 		}
-		s.commands = append(s.commands, newShell(line))
-		heredoc, heredocDash = heredocDelim(line)
 	}
-
-	return s, nil
+	return lineScan{literal: lit, quote: q, backslash: esc}
 }
 
 var heredocStart = regexp.MustCompile(`<<(-?)[ \t]*(?:"([^"]*)"|'([^']*)'|([A-Za-z_][A-Za-z0-9_]*))`)
 
 // heredocDelim reports the delimiter a line opens a heredoc with, and whether
-// the `<<-` form was used (which lets the terminator be indented with tabs).
+// the `<<-` form was used.
 func heredocDelim(line string) (delim string, dash bool) {
-	inQuotes := quoted(line)
+	return heredocIn(line, scanLine(line, 0).literal)
+}
+
+// heredocIn is heredocDelim given the line's scan, which the caller may know
+// better than a fresh one would (a quote can be open from a previous line).
+func heredocIn(line string, literal []bool) (delim string, dash bool) {
 	for _, m := range heredocStart.FindAllStringSubmatchIndex(line, -1) {
 		if m[0] > 0 && line[m[0]-1] == '<' {
 			continue // `<<<` is a here-string, not a heredoc
 		}
-		if inQuotes[m[0]] {
+		if literal[m[0]] {
 			continue // `echo "a << b"` is text, not a redirection
 		}
 		for _, g := range [][2]int{{m[4], m[5]}, {m[6], m[7]}, {m[8], m[9]}} {
@@ -250,34 +255,4 @@ func heredocDelim(line string) (delim string, dash bool) {
 		}
 	}
 	return "", false
-}
-
-// quoted marks the bytes of line that sit inside single or double quotes.
-func quoted(line string) []bool {
-	in := make([]bool, len(line))
-	var q byte
-	for i := 0; i < len(line); i++ {
-		c := line[i]
-		if q != 0 {
-			in[i] = true
-			if c == q {
-				q = 0
-			}
-			continue
-		}
-		if c == '\'' || c == '"' {
-			q = c
-		}
-	}
-	return in
-}
-
-// hasHandover reports whether the script hands the terminal over at any point.
-func (s *script) hasHandover() bool {
-	for _, c := range s.commands {
-		if _, ok := c.(handover); ok {
-			return true
-		}
-	}
-	return false
 }

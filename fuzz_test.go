@@ -126,7 +126,11 @@ func FuzzStripQueries(f *testing.F) {
 // or reordered a line would type something the author never wrote.
 func FuzzParseScript(f *testing.F) {
 	f.Add("echo hi\n")
-	f.Add("#$ delay 10\n#$ wait 20\n#$ handover\nnano f\n")
+	f.Add("#$ delay 10\n#$ pause 20\n#$ handover\nnano f\n")
+	f.Add("echo one \\\n  two\n")
+	f.Add("echo \"a\nb\"\n")
+	f.Add("echo hi\n#$ pause 100\n")
+	f.Add("echo hi\n#$ delay 100\n")
 	f.Add("cat <<'EOF'\nbody\nEOF\necho after\n")
 	f.Add("cat <<-EOF\n\tbody\n\tEOF\n")
 	f.Add("echo \"a << b\"\n\n\necho c\n")
@@ -142,7 +146,9 @@ func FuzzParseScript(f *testing.F) {
 			switch {
 			case strings.Contains(err.Error(), errUnknownCtrl.Error()),
 				strings.Contains(err.Error(), errNoArgs.Error()),
-				strings.Contains(err.Error(), errBadArg.Error()):
+				strings.Contains(err.Error(), errBadArg.Error()),
+				strings.Contains(err.Error(), errDangling.Error()),
+				strings.Contains(err.Error(), errUnterminated.Error()):
 				return
 			}
 			t.Fatalf("parseScript(%q) failed with an unreportable error: %v", text, err)
@@ -151,21 +157,18 @@ func FuzzParseScript(f *testing.F) {
 		lines := strings.Split(text, "\n")
 		at := 0
 		for i, c := range s.commands {
-			sh, ok := c.(shell)
-			if !ok {
-				continue
+			if len(c.lines) == 0 {
+				t.Fatalf("parseScript(%q) command %d has no lines", text, i)
 			}
-			if !strings.HasSuffix(sh.cmd, "\n") {
-				t.Fatalf("parseScript(%q) command %d is %q, which would never run", text, i, sh.cmd)
-			}
-			want := strings.TrimSuffix(sh.cmd, "\n")
-			for at < len(lines) && lines[at] != want {
+			for _, want := range c.lines {
+				for at < len(lines) && lines[at] != want {
+					at++
+				}
+				if at == len(lines) {
+					t.Fatalf("parseScript(%q) command %d has %q, which is not a line of the script (or is out of order)", text, i, want)
+				}
 				at++
 			}
-			if at == len(lines) {
-				t.Fatalf("parseScript(%q) command %d is %q, which is not a line of the script (or is out of order)", text, i, want)
-			}
-			at++
 		}
 	})
 }
@@ -192,7 +195,7 @@ func FuzzJitterPlan(f *testing.F) {
 		floor := time.Duration(float64(base) * pauseFloorFactor)
 		ceil := time.Duration(float64(base) * pauseCeilFactor)
 
-		ks := newJitter(scale, 12345).plan(line, base)
+		ks := newJitter(scale, 12345).plan(line, base, 0)
 		if got := replay(ks); got != line {
 			t.Fatalf("plan(%q) types %q", line, got)
 		}

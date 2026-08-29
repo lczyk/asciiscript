@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -51,20 +51,6 @@ func TestMirrorSaw(t *testing.T) {
 	m.run(strings.NewReader("prompt$ echo hi\r\nhi\r\n"))
 	assert.That(t, m.saw("echo hi"), "should have seen the echoed command")
 	assert.That(t, !m.saw("echo bye"), "should not see what was never typed")
-}
-
-// A too-small --settle means asciinema swallows every keystroke; the run has to
-// say so rather than produce an empty recording.
-func TestConfirmEchoFailsWhenNothingComesBack(t *testing.T) {
-	s, _ := newRecordedScript(t, 0)
-	err := s.confirmEcho("echo hi\n", 0)
-	assert.Error(t, err, "--settle")
-}
-
-func TestConfirmEchoPassesOnEcho(t *testing.T) {
-	s, _ := newRecordedScript(t, 0)
-	s.mon.head = []byte("prompt$ echo hi")
-	assert.NoError(t, s.confirmEcho("echo hi\n", time.Second))
 }
 
 // `exit` only reaches bash if bash is the one reading the terminal; anything
@@ -169,60 +155,124 @@ func TestMirrorCleanLeavesOrdinaryOutput(t *testing.T) {
 	assert.Equal(t, string(mon.clean([]byte(line))), line)
 }
 
+func TestConfirmEchoFailsWhenNothingComesBack(t *testing.T) {
+	s, _ := newTestSession(t)
+	err := s.confirmEcho("echo hi", 0)
+	assert.Error(t, err, "--settle")
+}
+
+func TestConfirmEchoPassesOnEcho(t *testing.T) {
+	s, _ := newTestSession(t)
+	s.mon.head = []byte("$ echo hi\r\nhi\r\n")
+	assert.NoError(t, s.confirmEcho("echo hi", 0))
+}
+
+// Each pause belongs to the gap *before* its keystroke, so typeLine must wait
+// it out and only then write. Typing first would shift every digraph and
+// word-boundary pause one key late.
+func TestTypeLineWaitsBeforeEachKeystroke(t *testing.T) {
+	s, rec := newTestSession(t)
+	plan := newJitter(1, 7).plan("ab\n", 40*time.Millisecond, 0)
+
+	assert.NoError(t, s.typeLine("ab", 40*time.Millisecond, 0))
+
+	assert.EqualArrays(t, rec.events, []string{
+		"s:" + plan[0].pause.String(), "w:a",
+		"s:" + plan[1].pause.String(), "w:b",
+		"s:" + plan[2].pause.String(), "w:\n",
+	})
+}
+
+// --speed scales everything the script says about timing, the pause included:
+// twice as fast is the whole take twice as fast.
+func TestTypeLineScalesWithSpeed(t *testing.T) {
+	s, rec := newTestSession(t)
+	s.jitter = newJitter(0, 1)
+	s.speed = 2
+
+	assert.NoError(t, s.typeLine("ab", 40*time.Millisecond, 500*time.Millisecond))
+	assert.EqualArrays(t, rec.events, []string{
+		"s:250ms", "w:a", "s:20ms", "w:b", "s:20ms", "w:\n",
+	})
+}
+
+func TestTypeLineReturnsWriteError(t *testing.T) {
+	s, rec := newTestSession(t)
+	rec.err = errors.New("pty is gone")
+
+	err := s.typeLine("echo hi", 0, 0)
+	assert.Error(t, err, "writing to pty failed")
+}
+
+// An interrupted sleep aborts typing rather than finishing the line.
+func TestTypeLineStopsWhenInterrupted(t *testing.T) {
+	s, _ := newTestSession(t)
+	done := make(chan struct{})
+	close(done)
+	s.done = done
+	s.sleep = s.realSleep
+
+	assert.ErrorIs(t, s.typeLine("echo hi", 0, 0), errInterrupted)
+}
+
+func TestRealSleepInterrupted(t *testing.T) {
+	s := newSession()
+	done := make(chan struct{})
+	close(done)
+	s.done = done
+
+	assert.ErrorIs(t, s.realSleep(time.Hour), errInterrupted)
+	assert.ErrorIs(t, s.realSleep(0), errInterrupted)
+	assert.NoError(t, (&session{}).realSleep(0))
+}
+
 func TestSyncPromptReturnsOnANewPrompt(t *testing.T) {
-	s, _ := newRecordedScript(t, 0)
+	s, _ := newTestSession(t)
 	s.cmdTimeout = time.Minute
 	s.mon.marks = 4
 
-	assert.NoError(t, s.syncPrompt("sleep 1\n", 3))
+	assert.NoError(t, s.syncPrompt("sleep 1", 3))
 	assert.Equal(t, warnings(s), "")
 }
 
 // The prompt already on screen when a line is typed is not that line finishing.
 // Counting it would make every wait a no-op and the whole feature silent.
 func TestSyncPromptWaitsPastThePromptItStartedFrom(t *testing.T) {
-	s, _ := newRecordedScript(t, 0)
+	s, _ := newTestSession(t)
 	s.cmdTimeout = 20 * time.Millisecond
 	s.mon.marks = 3
 
-	assert.NoError(t, s.syncPrompt("nano f\n", 3))
+	assert.NoError(t, s.syncPrompt("nano f", 3))
 	assert.ContainsString(t, warnings(s), "hasn't finished")
 }
 
 // A command that holds the terminal never gives a prompt back. Typing on
 // regardless is the old behaviour; the warning is what makes it diagnosable.
 func TestSyncPromptWarnsAndCarriesOnAtTheTimeout(t *testing.T) {
-	s, _ := newRecordedScript(t, 0)
+	s, _ := newTestSession(t)
 	s.cmdTimeout = 20 * time.Millisecond
 
-	assert.NoError(t, s.syncPrompt("nano rockcraft.yaml\n", 0))
+	assert.NoError(t, s.syncPrompt("nano rockcraft.yaml", 0))
 
 	warning := warnings(s)
 	assert.ContainsString(t, warning, "nano rockcraft.yaml")
 	assert.ContainsString(t, warning, "#$ handover")
-	assert.That(t, !strings.Contains(warning, `\n"`), "the trailing newline should be trimmed")
 }
 
 func TestSyncPromptStopsWhenInterrupted(t *testing.T) {
-	s, _ := newRecordedScript(t, 0)
+	s, _ := newTestSession(t)
 	s.cmdTimeout = time.Minute
 	done := make(chan struct{})
 	close(done)
 	s.done = done
 	s.sleep = s.realSleep
 
-	assert.ErrorIs(t, s.syncPrompt("sleep 1\n", 0), errInterrupted)
+	assert.ErrorIs(t, s.syncPrompt("sleep 1", 0), errInterrupted)
 }
 
-// The whole point: the next line isn't typed until the previous one is done.
-func TestTypeAllWaitsForEachCommand(t *testing.T) {
-	s, rec := newRecordedScript(t, 0)
-	s.commands = []command{newShell("a"), newShell("b")}
-	s.wait = 0
-	s.cmdTimeout = time.Minute
-	s.mon.head = []byte("a") // stands in for the echo confirmEcho looks for
-
-	// One prompt per line, and only once that line has been typed in full.
+// promptsOnEnter makes the recorder stand in for the shell: one prompt per
+// line, and only once that line has been typed in full.
+func promptsOnEnter(s *session, rec *recorder) {
 	rec.onWrite = func(p string) {
 		if p == "\n" {
 			s.mon.mu.Lock()
@@ -230,8 +280,16 @@ func TestTypeAllWaitsForEachCommand(t *testing.T) {
 			s.mon.mu.Unlock()
 		}
 	}
+}
 
-	assert.NoError(t, s.typeAll(0))
+// The whole point: the next line isn't typed until the previous one is done.
+func TestTypeAllWaitsForEachCommand(t *testing.T) {
+	s, rec := newTestSession(t)
+	s.cmdTimeout = time.Minute
+	s.mon.head = []byte("a") // stands in for the echo confirmEcho looks for
+	promptsOnEnter(s, rec)
+
+	assert.NoError(t, s.typeAll(&script{commands: []command{cmd("a"), cmd("b")}}, 0))
 	assert.EqualArrays(t, typedLines(rec), []string{"a\n", "b\n"})
 	assert.Equal(t, warnings(s), "")
 }
@@ -239,64 +297,64 @@ func TestTypeAllWaitsForEachCommand(t *testing.T) {
 // With no prompt ever coming back, syncing must still let the script finish --
 // slowly, a timeout per line, but finish.
 func TestTypeAllTypesOnAfterTheTimeout(t *testing.T) {
-	s, rec := newRecordedScript(t, 0)
-	s.commands = []command{newShell("nano f"), newShell("b")}
-	s.wait = 0
+	s, rec := newTestSession(t)
 	s.cmdTimeout = time.Millisecond
 	s.mon.head = []byte("nano f")
 
-	assert.NoError(t, s.typeAll(0))
+	assert.NoError(t, s.typeAll(&script{commands: []command{cmd("nano f"), cmd("b")}}, 0))
 	assert.EqualArrays(t, typedLines(rec), []string{"nano f\n", "b\n"})
 	assert.ContainsString(t, warnings(s), "nano f")
 }
 
-// `#$ delay` and `#$ wait` are only worth anything if they reach the typing, so
-// check the gaps a script asks for are the gaps that come out.
-func TestControlCommandsChangeTheTiming(t *testing.T) {
-	s, err := parseScript("#$ delay 70\n#$ wait 250\nab\n")
+// `#$ delay` and `#$ pause` are only worth anything if they reach the typing,
+// so check the gaps a script asks for are the gaps that come out -- and that
+// they are the one command's, with the next back on the defaults.
+func TestTypeAllTimesEachCommandAsAsked(t *testing.T) {
+	sc, err := parseScript("#$ delay 70\n#$ pause 250\nab\nc\n#$ pause 900\n")
 	assert.NoError(t, err)
 
-	rec := &recorder{}
-	s.pty = rec
-	s.sleep = rec.sleep
-	s.jitter = newJitter(0, 1) // no jitter: every pause is exactly the delay
-	s.warn = &bytes.Buffer{}
+	s, rec := newTestSession(t)
+	s.jitter = newJitter(0, 1) // no jitter: every pause is exactly what was asked
 	s.mon.head = []byte("ab")
+	promptsOnEnter(s, rec)
 
-	assert.NoError(t, s.typeAll(0))
-	assert.Equal(t, s.delay, 70*time.Millisecond)
-	assert.Equal(t, s.wait, 250*time.Millisecond)
+	assert.NoError(t, s.typeAll(sc, 0))
 	assert.EqualArrays(t, rec.events, []string{
 		"s:0s", // the settle
-		"s:70ms", "w:a",
-		"s:70ms", "w:b",
-		"s:70ms", "w:\n",
-		"s:250ms", // the wait, after the line
+		"s:250ms", "w:a", "s:70ms", "w:b", "s:70ms", "w:\n",
+		"s:40ms", "w:c", "s:40ms", "w:\n", // back on the defaults, the model's own line gap in front
+		"s:900ms", // the trailing pause, holding the last prompt
 	})
 }
 
-// A pause belongs to the line it precedes, so `#$ wait N` slows down the line
-// written under it -- not the one after that. Control lines cost nothing
-// themselves: they are notes to asciiscript, never typed at the shell.
-func TestWaitAppliesToTheLineThatFollowsIt(t *testing.T) {
-	s, rec := newScriptFrom(t, "a\n#$ wait 500\nb\n")
-	s.mon.head = []byte("a")
+// The pause the script asks for is for the command, so its first line. The
+// lines a heredoc runs on to get the model's ordinary line gap.
+func TestTypeAllPausesBeforeTheFirstLineOnly(t *testing.T) {
+	sc, err := parseScript("#$ pause 500\ncat <<EOF\nbody\nEOF\n")
+	assert.NoError(t, err)
 
-	assert.NoError(t, s.typeAll(0))
-	assert.EqualArrays(t, rec.events, []string{
-		"s:0s",                        // the settle
-		"s:0s", "w:a", "s:0s", "w:\n", // first line: nothing to pause after yet
-		"s:500ms",                     // the gap #$ wait asked for, before b
-		"s:0s", "w:b", "s:0s", "w:\n", // and no pause charged for the control line
-		"s:500ms", // a last beat before `exit` lands
-	})
+	s, rec := newTestSession(t)
+	s.jitter = newJitter(0, 1)
+	s.mon.head = []byte("cat <<EO")
+	promptsOnEnter(s, rec)
+
+	assert.NoError(t, s.typeAll(sc, 0))
+	assert.Equal(t, rec.events[1], "s:500ms")
+	assert.EqualArrays(t, typedLines(rec), []string{"cat <<EOF\n", "body\n", "EOF\n"})
+	var paused int
+	for _, e := range rec.events {
+		if e == "s:500ms" {
+			paused++
+		}
+	}
+	assert.Equal(t, paused, 1, "body and EOF should get the model's own line gap, not the pause again")
 }
 
 // The wait has to actually wait. Handing it a mark that is already there (as
 // the cheaper tests do) can't tell a working wait from one that never runs, so
 // this one makes the prompt arrive late, from another goroutine.
 func TestSyncPromptPollsUntilThePromptArrives(t *testing.T) {
-	s, _ := newRecordedScript(t, 0)
+	s, _ := newTestSession(t)
 	s.cmdTimeout = 5 * time.Second
 	s.sleep = s.realSleep // real sleeps: the polling is the thing under test
 
@@ -309,7 +367,7 @@ func TestSyncPromptPollsUntilThePromptArrives(t *testing.T) {
 	}()
 
 	start := time.Now()
-	assert.NoError(t, s.syncPrompt("sleep 1\n", 0))
+	assert.NoError(t, s.syncPrompt("sleep 1", 0))
 	took := time.Since(start)
 
 	assert.That(t, took >= late, "should have waited for the prompt to come back")
@@ -320,9 +378,7 @@ func TestSyncPromptPollsUntilThePromptArrives(t *testing.T) {
 // The same thing one level up, which is what a script actually relies on: the
 // second line must not reach the pty until the first line's prompt is back.
 func TestTypeAllHoldsTheNextLineUntilThePromptComesBack(t *testing.T) {
-	s, rec := newRecordedScript(t, 0)
-	s.commands = []command{newShell("first"), newShell("second")}
-	s.wait = 0
+	s, rec := newTestSession(t)
 	s.cmdTimeout = 5 * time.Second
 	s.sleep = s.realSleep
 	s.mon.head = []byte("first")
@@ -342,7 +398,7 @@ func TestTypeAllHoldsTheNextLineUntilThePromptComesBack(t *testing.T) {
 	}
 
 	start := time.Now()
-	assert.NoError(t, s.typeAll(0))
+	assert.NoError(t, s.typeAll(&script{commands: []command{cmd("first"), cmd("second")}}, 0))
 
 	assert.That(t, time.Since(start) >= 2*runtime, "both lines should have waited on their own prompt")
 	assert.EqualArrays(t, typedLines(rec), []string{"first\n", "second\n"})

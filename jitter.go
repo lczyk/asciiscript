@@ -35,19 +35,39 @@ func newJitter(scale float64, seed int64) *jitter {
 	return &jitter{rng: rand.New(rand.NewSource(seed)), scale: scale}
 }
 
-// plan turns a line into keystrokes typed at the given base per-key delay. Each
-// keystroke carries the line's own bytes rather than a re-encoded rune, so a
-// script that isn't valid UTF-8 still types exactly as written.
-func (j *jitter) plan(line string, base time.Duration) []keystroke {
+// plan turns a line into keystrokes typed at the given base per-key delay. The
+// pause before the first key is the model's own line gap, or pause if the
+// script asked for one. Each keystroke carries the line's own bytes rather
+// than a re-encoded rune, so a script that isn't valid UTF-8 still types
+// exactly as written.
+func (j *jitter) plan(line string, base, pause time.Duration) []keystroke {
 	ks := make([]keystroke, 0, len(line))
 	var prev rune
 	for i, w := 0, 0; i < len(line); i += w {
 		var ch rune
 		ch, w = utf8.DecodeRuneInString(line[i:])
-		ks = append(ks, keystroke{line[i : i+w], j.pauseFor(prev, ch, base)})
+		p := j.pauseFor(prev, ch, base)
+		if i == 0 {
+			p = j.linePause(base, pause)
+		}
+		ks = append(ks, keystroke{line[i : i+w], p})
 		prev = ch
 	}
 	return ks
+}
+
+// linePause is the gap before a line's first key: the boundary multiplier on
+// the base delay, or -- when the script asked for a pause -- that, jittered
+// around the value asked for. Either way scale 0 gives it exactly.
+func (j *jitter) linePause(base, pause time.Duration) time.Duration {
+	s := j.scale
+	if pause > 0 {
+		p := float64(pause) * math.Exp(j.rng.NormFloat64()*jitterSigma*s)
+		return clampPause(time.Duration(p), pause)
+	}
+	mult := max(1+(lineFactor-1)*s, minTransMult)
+	p := float64(base) * mult * math.Exp(j.rng.NormFloat64()*jitterSigma*s)
+	return clampPause(time.Duration(p), base)
 }
 
 // pauseFor is the delay before typing ch, given the char before it. Three
@@ -88,6 +108,7 @@ const (
 
 	// boundary / digraph multipliers (applied to the pause before a key, by
 	// what preceded it)
+	lineFactor       = 2.5 // before a line's first key (after the previous one ran)
 	spaceFactor      = 2.8 // after a space (word boundary)
 	punctFactor      = 2.7 // after punctuation
 	digitFactor      = 1.2 // after a digit

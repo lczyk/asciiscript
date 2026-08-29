@@ -60,7 +60,7 @@ func main() {
 		log.Fatal("parsing script failed: ", err)
 	}
 
-	if err := s.record(&opts); err != nil {
+	if err := record(s, &opts); err != nil {
 		log.Fatal(err)
 	}
 }

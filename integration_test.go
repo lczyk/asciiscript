@@ -25,10 +25,10 @@ type event struct {
 	data string
 }
 
-// record runs a script through a real `asciinema rec` and returns the events it
+// capture runs a script through a real `asciinema rec` and returns the events it
 // wrote. Skipped rather than failed where asciinema isn't installed: the rest of
 // the suite has no such dependency and shouldn't grow one.
-func record(t *testing.T, script string, o options) []event {
+func capture(t *testing.T, script string, o options) []event {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("records for real, which takes seconds")
@@ -58,7 +58,7 @@ func record(t *testing.T, script string, o options) []event {
 	if err != nil {
 		t.Fatalf("parsing the script failed: %v", err)
 	}
-	if err := s.record(&o); err != nil {
+	if err := record(s, &o); err != nil {
 		t.Fatalf("recording failed: %v", err)
 	}
 	return readCast(t, out)
@@ -127,7 +127,7 @@ func submitted(t *testing.T, events []event, line string) int {
 }
 
 func TestRecordsASession(t *testing.T) {
-	events := record(t, "#$ wait 50\necho alpha\necho bravo\n", options{})
+	events := capture(t, "echo alpha\necho bravo\n", options{})
 
 	got := output(events)
 	assert.ContainsString(t, got, "alpha\r\n")
@@ -140,12 +140,12 @@ func TestRecordsASession(t *testing.T) {
 	assert.Equal(t, last.data, "0", "the recorded shell should exit cleanly")
 }
 
-// The one that matters: `#$ wait 50` is nowhere near the two seconds `sleep`
-// takes, so the only thing that can stop `echo bravo` being typed into the
-// running sleep is the wait for its prompt. When that regresses, the keystrokes
+// The one that matters: the model's line gap is nowhere near the two seconds
+// `sleep` takes, so the only thing that can stop `echo bravo` being typed into
+// the running sleep is the wait for its prompt. When that regresses, the keystrokes
 // show up in the recording a few hundred milliseconds after the sleep starts.
 func TestWaitsForASlowCommandBeforeTypingTheNext(t *testing.T) {
-	events := record(t, "#$ wait 50\necho alpha\nsleep 2\necho bravo\n", options{})
+	events := capture(t, "echo alpha\nsleep 2\necho bravo\n", options{})
 
 	i := submitted(t, events, "sleep 2")
 	next := events[i+1]
@@ -159,15 +159,15 @@ func TestWaitsForASlowCommandBeforeTypingTheNext(t *testing.T) {
 // A marker in every prompt is what the wait watches for, so it has to be in the
 // recording.
 func TestPromptsCarryTheMarker(t *testing.T) {
-	assert.ContainsString(t, output(record(t, "echo hi\n", options{})), "\x1b]133;D;")
+	assert.ContainsString(t, output(capture(t, "echo hi\n", options{})), "\x1b]133;D;")
 }
 
 // Continuation lines sit at PS2, which carries the marker too, so a heredoc
 // shouldn't spend a --cmd-timeout per line. The timeout here is short enough
 // that waiting one out would be unmistakable.
 func TestHeredocDoesNotStallOnEveryLine(t *testing.T) {
-	events := record(t,
-		"#$ wait 50\ncat <<'YAML'\nname: demo\nbase: bare\nYAML\n",
+	events := capture(t,
+		"cat <<'YAML'\nname: demo\nbase: bare\nYAML\n",
 		options{CmdTimeout: 3000})
 
 	got := output(events)
@@ -176,6 +176,25 @@ func TestHeredocDoesNotStallOnEveryLine(t *testing.T) {
 	total := events[len(events)-1].at
 	assert.That(t, total < 3,
 		"the heredoc should flow, not wait out a timeout per line; took "+formatSeconds(total))
+}
+
+// A backslash continuation is one command to bash and to asciiscript alike:
+// typed line by line at PS2, run once, waited for once.
+func TestBackslashContinuationRuns(t *testing.T) {
+	events := capture(t, "echo one \\\n  two\n", options{CmdTimeout: 3000})
+	assert.ContainsString(t, output(events), "one two\r\n")
+	assert.That(t, events[len(events)-1].at < 3, "should not have waited out a timeout")
+}
+
+// A trailing pause is the one control line with nothing after it: it holds
+// the last prompt before the session ends, and the recording is that much
+// longer for it.
+func TestTrailingPauseHoldsTheLastPrompt(t *testing.T) {
+	quick := capture(t, "echo hi\n", options{})
+	held := capture(t, "echo hi\n#$ pause 1500\n", options{})
+	// --speed 2 in record halves the pause asked for.
+	assert.That(t, held[len(held)-1].at-quick[len(quick)-1].at > 0.5,
+		"the held recording should run longer by about the pause")
 }
 
 func formatSeconds(f float64) string {

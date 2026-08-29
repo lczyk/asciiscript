@@ -9,7 +9,7 @@ import (
 	"github.com/lczyk/assert"
 )
 
-// recorder stands in for the pty and the clock, so a shell.Run can be replayed
+// recorder stands in for the pty and the clock, so typing can be replayed
 // without a terminal and its keystroke/pause interleaving inspected.
 type recorder struct {
 	events  []string
@@ -35,12 +35,12 @@ func (r *recorder) sleep(d time.Duration) error {
 	return nil
 }
 
-func newRecordedScript(t *testing.T, delay time.Duration) (*script, *recorder) {
+// newTestSession is a session wired to a recorder instead of a pty and a
+// clock, warnings captured, typing with the real timing model at a fixed seed.
+func newTestSession(t *testing.T) (*session, *recorder) {
 	t.Helper()
-	s, err := parseScript("")
-	assert.NoError(t, err)
+	s := newSession()
 	rec := &recorder{}
-	s.delay = delay
 	s.pty = rec
 	s.sleep = rec.sleep
 	s.jitter = newJitter(1, 7)
@@ -48,24 +48,13 @@ func newRecordedScript(t *testing.T, delay time.Duration) (*script, *recorder) {
 	return s, rec
 }
 
-// newScriptFrom is newRecordedScript for a script with actual content, typing
-// at zero delay so the recorded events are the structure and nothing else.
-func newScriptFrom(t *testing.T, text string) (*script, *recorder) {
-	t.Helper()
-	s, err := parseScript(text)
-	assert.NoError(t, err)
-	rec := &recorder{}
-	s.delay = 0
-	s.pty = rec
-	s.sleep = rec.sleep
-	s.jitter = newJitter(0, 1)
-	s.warn = &bytes.Buffer{}
-	return s, rec
-}
+// cmd is a one-line command typed at zero delay, so what a recorder sees is
+// the structure of the typing and nothing else.
+func cmd(line string) command { return command{lines: []string{line}} }
 
-// warnings is everything the script has reported to the user, the recorded
+// warnings is everything the session has reported to the user, the recorded
 // session untouched.
-func warnings(s *script) string { return s.warn.(*bytes.Buffer).String() }
+func warnings(s *session) string { return s.warn.(*bytes.Buffer).String() }
 
 // typedLines reassembles the keystrokes a recorder saw into whole lines, so a
 // test can assert on what was typed without minding the per-key writes.
