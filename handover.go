@@ -1,3 +1,5 @@
+//go:build !windows
+
 package main
 
 import (
@@ -5,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 
 	"golang.org/x/term"
 )
@@ -75,6 +79,11 @@ func (s *session) rawStdin() (func(), error) {
 // lendTerminal types nothing and waits for nobody: the person running the recording
 // drives the command that was just typed, and the script resumes when they land
 // back at a prompt. There is no deadline -- the wait is on a human.
+//
+// For the duration, the recorded session's terminal queries go through to the
+// real one (whose replies the keyboard carries back), and the recording follows
+// the real terminal's size, so the handed-over command sees the screen it's
+// actually being driven from.
 func (s *session) lendTerminal(before int) error {
 	restore, err := s.raw()
 	if err != nil {
@@ -84,26 +93,40 @@ func (s *session) lendTerminal(before int) error {
 
 	back := s.keys.lend(s.pty)
 	defer back()
+	s.mon.lent.Store(true)
+	defer s.mon.lent.Store(false)
 
-	for s.mon.marked() <= before {
-		if err := s.sleep(syncPoll); err != nil {
-			return err
-		}
+	if s.resize != nil {
+		winch := make(chan os.Signal, 1)
+		signal.Notify(winch, syscall.SIGWINCH)
+		go func() {
+			for range winch {
+				s.resize()
+			}
+		}()
+		defer func() {
+			signal.Stop(winch)
+			close(winch)
+		}()
 	}
-	return nil
+
+	_, err = s.awaitPrompt(before, 0)
+	return err
 }
 
 // checkHandover rejects the settings a `#$ handover` script can't work under.
 // Both are silent traps otherwise: the person driving would be typing into a
-// session they can't see, or one nothing is listening on.
-func checkHandover(wants bool, o *options) error {
+// session they can't see, or one nothing is listening on. tty says whether
+// stdin is a terminal; it's an argument so the check doesn't depend on how the
+// tests happen to be run.
+func checkHandover(wants bool, o *options, tty bool) error {
 	if !wants {
 		return nil
 	}
 	switch {
 	case o.Quiet:
 		return errors.New("`#$ handover` needs the session on screen to be driven, so it can't be recorded with --quiet")
-	case !term.IsTerminal(int(os.Stdin.Fd())):
+	case !tty:
 		return errors.New("`#$ handover` needs a keyboard to hand over to, and stdin isn't a terminal")
 	}
 	return nil

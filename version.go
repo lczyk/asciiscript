@@ -1,36 +1,36 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
+	"strings"
 
 	ver "github.com/lczyk/version/go"
 )
 
-//go:generate go run github.com/lczyk/version/go/cmd/generate-version -out version_gen.go -pkg main -init
+//go:embed VERSION
+var versionFile string
 
-// Build stamps, filled in by version_gen.go's init from the VERSION file and
-// the git state at build time. A tree built without `make generate-version`
-// keeps these defaults.
-var (
-	Version   = "0.0.0-dev"
-	CommitSHA string
-	BuildDate string
-	BuildInfo string
-)
-
-// wantsVersion reports whether the args ask for the version. It's checked
-// before go-flags parses, so `--version` isn't refused for want of the
-// required positional arguments.
-func wantsVersion(args []string) bool {
-	for _, a := range args {
-		if a == "--version" || a == "-v" {
-			return true
+// fallbackVersion is the VERSION file's version, parsed the same way as the
+// file itself: first non-blank, non-# line, which must be a SemVer triple.
+// It's what versionLine reports when the binary carries no VCS-stamped
+// version -- a plain `go build`, or a build with no git checkout at all.
+func fallbackVersion() string {
+	for _, line := range strings.Split(versionFile, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			return line
 		}
 	}
-	return false
+	return ""
 }
 
-// versionLine is what `--version` prints.
+// versionLine is what `--version` prints. Go marks a build from a tree with
+// uncommitted changes `+dirty` in the version itself, which says it already.
 func versionLine() string {
-	return fmt.Sprintf("asciiscript %s", ver.FormatVersion(Version, CommitSHA, BuildDate, BuildInfo))
+	info := ver.Read(fallbackVersion())
+	if strings.HasSuffix(info.Version, "+dirty") {
+		info.BuildInfo = ""
+	}
+	return fmt.Sprintf("asciiscript %s", info)
 }

@@ -18,10 +18,14 @@ const ctrlPrefix = "#$"
 // `#$ delay` in front of it says otherwise.
 const defaultDelay = 40 * time.Millisecond
 
+// maxDelay is the longest a `#$ delay` or `#$ pause` may ask for.
+const maxDelay = time.Hour
+
 var (
 	errUnknownCtrl  = errors.New("unknown control command")
 	errNoArgs       = errors.New("no arguments given to command")
 	errBadArg       = errors.New("invalid command argument")
+	errArgRange     = errors.New("argument out of range")
 	errDangling     = errors.New("control line with no command after it to apply to")
 	errUnterminated = errors.New("command runs past the end of the script")
 	errInterrupted  = errors.New("interrupted")
@@ -139,7 +143,10 @@ func parseCtrl(text string) (kind string, d time.Duration, err error) {
 	}
 }
 
-// millis parses a control command's single argument, in milliseconds.
+// millis parses a control command's single argument, in milliseconds. The
+// bound keeps a typo from either typing instantly (a negative delay) or
+// hanging the recording for absurdly long; it is checked before the value is
+// ever turned into a Duration, so a huge argument can't overflow one either.
 func millis(opts []string) (time.Duration, error) {
 	if len(opts) == 0 {
 		return 0, errNoArgs
@@ -148,64 +155,76 @@ func millis(opts []string) (time.Duration, error) {
 	if err != nil {
 		return 0, errBadArg
 	}
+	if ms < 0 || ms > int64(maxDelay/time.Millisecond) {
+		return 0, fmt.Errorf("%w: must be between 0 and %s", errArgRange, maxDelay)
+	}
 	return time.Millisecond * time.Duration(ms), nil
 }
 
-// continuation tracks whether the command being read is still going: inside a
-// heredoc, with a quote left open, or after a line ending in a backslash.
+// continuation tracks whether the command being read is still going: inside
+// one or more heredocs, with a quote left open, or after a line ending in a
+// backslash.
 type continuation struct {
-	heredoc   string // delimiter of the open heredoc, if any
-	dash      bool   // the `<<-` form: the delimiter may be indented with tabs
-	quote     byte   // the open quote, if any
-	backslash bool   // the last line ended in an unescaped backslash
+	heredocs  []heredocMark // pending delimiters, read in order: body then terminator, each in turn
+	quote     byte          // the open quote, if any
+	ansi      bool          // the open quote (always '\'' when set) is a `$'...'` one
+	backslash bool          // the last line ended in an unescaped backslash
 }
 
 func (c *continuation) open() bool {
-	return c.heredoc != "" || c.quote != 0 || c.backslash
+	return len(c.heredocs) > 0 || c.quote != 0 || c.backslash
 }
 
-// feed reads one more line of the command.
+// feed reads one more line of the command. Heredoc bodies start once the
+// command line itself is complete: a quote or backslash carrying it on to the
+// next line comes first, as bash reads it.
 func (c *continuation) feed(line string) {
-	if c.heredoc != "" {
+	if len(c.heredocs) > 0 && c.quote == 0 && !c.backslash {
+		next := c.heredocs[0]
 		term := line
-		if c.dash {
+		if next.dash {
 			term = strings.TrimLeft(term, "\t")
 		}
-		if term == c.heredoc {
-			c.heredoc = ""
+		if term == next.delim {
+			c.heredocs = c.heredocs[1:]
 		}
 		return
 	}
-	sc := scanLine(line, c.quote)
-	c.quote, c.backslash = sc.quote, sc.backslash
-	if c.quote == 0 {
-		c.heredoc, c.dash = heredocIn(line, sc.literal)
-	}
+	sc := scanLine(line, c.quote, c.ansi)
+	c.quote, c.ansi, c.backslash = sc.quote, sc.ansi, sc.backslash
+	c.heredocs = append(c.heredocs, heredocIn(line, sc.literal)...)
 }
 
 // lineScan is what scanLine makes of a line of shell.
 type lineScan struct {
 	literal   []bool // per byte: text rather than syntax -- inside quotes, or in a comment
 	quote     byte   // the quote still open at the end of the line, if any
+	ansi      bool   // the open quote (always '\'' when set) is a `$'...'` one
 	backslash bool   // the line ends in an unescaped backslash
 }
 
-// scanLine walks a line of shell starting inside quote q (0 for none),
-// tracking quotes and backslash escapes the way bash reads them. An unquoted
-// `#` at a word start begins a comment, which runs to the end of the line.
-func scanLine(line string, q byte) lineScan {
+// scanLine walks a line of shell starting inside quote q (0 for none, ansi
+// saying whether that quote is a `$'...'` one), tracking quotes and backslash
+// escapes the way bash reads them. An unquoted `#` that starts a word --
+// after whitespace, or after a metacharacter that already ended the previous
+// word -- begins a comment, which runs to the end of the line.
+func scanLine(line string, q byte, ansi bool) lineScan {
 	lit := make([]bool, len(line))
-	esc := false
+	esc, dollar := false, false // dollar: the previous byte was a live, unquoted '$'
 	for i := 0; i < len(line); i++ {
 		c := line[i]
+		live := false
 		switch {
 		case esc:
 			esc = false
 			lit[i] = q != 0
 		case q == '\'':
 			lit[i] = true
-			if c == '\'' {
-				q = 0
+			switch {
+			case ansi && c == '\\':
+				esc = true
+			case c == '\'':
+				q, ansi = 0, false
 			}
 		case q == '"':
 			lit[i] = true
@@ -217,42 +236,103 @@ func scanLine(line string, q byte) lineScan {
 			}
 		case c == '\\':
 			esc = true
-		case c == '\'' || c == '"':
+		case c == '\'':
+			lit[i] = true
+			q, ansi = c, dollar
+		case c == '"':
 			lit[i] = true
 			q = c
-		case c == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t'):
+		case c == '#' && (i == 0 || strings.IndexByte(commentBefore, line[i-1]) >= 0):
 			for ; i < len(line); i++ {
 				lit[i] = true
 			}
-			return lineScan{literal: lit, quote: q}
+			return lineScan{literal: lit, quote: q, ansi: ansi}
+		default:
+			live = c == '$' && !dollar // `$$` is one token, and opens no `$'...'`
 		}
+		dollar = live
 	}
-	return lineScan{literal: lit, quote: q, backslash: esc}
+	return lineScan{literal: lit, quote: q, ansi: ansi, backslash: esc}
 }
 
-var heredocStart = regexp.MustCompile(`<<(-?)[ \t]*(?:"([^"]*)"|'([^']*)'|([A-Za-z_][A-Za-z0-9_]*))`)
+// commentBefore are the bytes after which an unquoted `#` starts a new word,
+// and so a comment: whitespace, or a metacharacter that already ends one.
+const commentBefore = " \t;|&()"
+
+// heredocMark is one pending heredoc: the delimiter its body ends at, and
+// whether the `<<-` form was used.
+type heredocMark struct {
+	delim string
+	dash  bool
+}
+
+// heredocOpenMark matches the `<<` or `<<-` that opens a heredoc, up to but
+// not including the delimiter word -- heredocWord reads that separately, with
+// its own quoting rules.
+var heredocOpenMark = regexp.MustCompile(`<<(-?)[ \t]*`)
+
+// heredocMeta are the shell metacharacters that end an unquoted heredoc
+// delimiter word, the way whitespace does.
+const heredocMeta = "|&;()<>"
 
 // heredocDelim reports the delimiter a line opens a heredoc with, and whether
-// the `<<-` form was used.
+// the `<<-` form was used. A line can open more than one heredoc; this is the
+// first.
 func heredocDelim(line string) (delim string, dash bool) {
-	return heredocIn(line, scanLine(line, 0).literal)
+	marks := heredocIn(line, scanLine(line, 0, false).literal)
+	if len(marks) == 0 {
+		return "", false
+	}
+	return marks[0].delim, marks[0].dash
 }
 
 // heredocIn is heredocDelim given the line's scan, which the caller may know
-// better than a fresh one would (a quote can be open from a previous line).
-func heredocIn(line string, literal []bool) (delim string, dash bool) {
-	for _, m := range heredocStart.FindAllStringSubmatchIndex(line, -1) {
+// better than a fresh one would (a quote can be open from a previous line),
+// and reports every heredoc the line opens, left to right.
+func heredocIn(line string, literal []bool) []heredocMark {
+	var marks []heredocMark
+	for _, m := range heredocOpenMark.FindAllStringSubmatchIndex(line, -1) {
 		if m[0] > 0 && line[m[0]-1] == '<' {
 			continue // `<<<` is a here-string, not a heredoc
 		}
 		if literal[m[0]] {
 			continue // `echo "a << b"` is text, not a redirection
 		}
-		for _, g := range [][2]int{{m[4], m[5]}, {m[6], m[7]}, {m[8], m[9]}} {
-			if g[0] >= 0 {
-				return line[g[0]:g[1]], m[3] > m[2]
-			}
+		if delim, ok := heredocWord(line[m[1]:]); ok {
+			marks = append(marks, heredocMark{delim, m[3] > m[2]})
 		}
 	}
-	return "", false
+	return marks
+}
+
+// heredocWord reads a heredoc delimiter from the text right after `<<`: one
+// bash word, running to the next unescaped whitespace or shell metacharacter,
+// with quoted runs taken verbatim and a backslash escaping the byte after it
+// -- so `EO"F"`, `"EOF"x` and `E\ OF` are EOF, EOFx and "E OF".
+func heredocWord(s string) (word string, ok bool) {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == '"' || c == '\'':
+			end := strings.IndexByte(s[i+1:], c)
+			if end < 0 {
+				return "", false
+			}
+			b.WriteString(s[i+1 : i+1+end])
+			i += end + 2
+		case c == '\\' && i+1 < len(s):
+			b.WriteByte(s[i+1])
+			i += 2
+		case c == '\\' || c == ' ' || c == '\t' || strings.IndexByte(heredocMeta, c) >= 0:
+			i = len(s)
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	if b.Len() == 0 {
+		return "", false
+	}
+	return b.String(), true
 }

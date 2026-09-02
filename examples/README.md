@@ -60,3 +60,11 @@ $ asciiscript --seed 12345 examples/git.sh out.cast      # reproduce a take you 
   line, or a second take begins from whatever the first one left behind. The same goes for
   config a tool reads from `$HOME` -- neutralise it if the demo should look the same
   everywhere.
+- **Keep lines inside the width.** The recording is 80 columns unless `--cols` says
+  otherwise, and a command that wraps (prompt included) is written into the .cast the way
+  readline redraws it, which only plays back cleanly at that exact width. asciiscript warns
+  about lines that will wrap; break them with `\` or widen the recording.
+- **Blocks are typed line by line.** An `if`/`for`/`while` block or a `{ }` group is several
+  commands to asciiscript, one per physical line; blank lines inside are skipped and a `#$`
+  line inside applies to the line after it. Heredocs, open quotes and trailing `\` are the
+  constructs that are read as one command.

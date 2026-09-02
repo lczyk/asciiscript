@@ -1,3 +1,5 @@
+//go:build !windows
+
 package main
 
 import (
@@ -14,14 +16,13 @@ import (
 // Each of these leaves the person driving either blind or stuck, so they're
 // worth catching before a take starts rather than halfway through one.
 func TestCheckHandoverRejectsUndriveableSettings(t *testing.T) {
-	assert.Error(t, checkHandover(true, &options{Quiet: true}), "--quiet")
-
-	// The suite's stdin isn't a terminal, which is the other trap.
-	assert.Error(t, checkHandover(true, &options{}), "isn't a terminal")
+	assert.Error(t, checkHandover(true, &options{Quiet: true}, true), "--quiet")
+	assert.Error(t, checkHandover(true, &options{}, false), "isn't a terminal")
+	assert.NoError(t, checkHandover(true, &options{}, true))
 }
 
 func TestCheckHandoverIgnoresScriptsWithout(t *testing.T) {
-	assert.NoError(t, checkHandover(false, &options{Quiet: true}))
+	assert.NoError(t, checkHandover(false, &options{Quiet: true}, false))
 }
 
 // A keypress only belongs in the recording while the terminal is on loan.
@@ -69,13 +70,34 @@ func TestKeyboardCanBeLentAgain(t *testing.T) {
 // driving quit the editor -- and not on any clock.
 func TestHandOverEndsOnThePrompt(t *testing.T) {
 	s, _ := newTestSession(t)
-	s.mon.marks = 1
 
 	restored := false
 	s.raw = func() (func(), error) { return func() { restored = true }, nil }
 
 	assert.NoError(t, s.lendTerminal(0))
 	assert.That(t, restored, "the terminal should be handed back")
+	assert.That(t, !s.mon.lent.Load(), "queries should be stripped again once the terminal is back")
+}
+
+// While the terminal is on loan the recorded session's queries go through to
+// it, since the person driving is there to have them answered.
+func TestHandOverLetsQueriesThrough(t *testing.T) {
+	s, _ := newTestSession(t)
+	s.raw = func() (func(), error) { return func() {}, nil }
+	s.mon.marks = 0
+
+	// The wait polls through sleep, which is the one moment mid-handover a
+	// test can look in on.
+	var lent bool
+	s.sleep = func(time.Duration) error {
+		lent = s.mon.lent.Load()
+		s.mon.marks = 1
+		return nil
+	}
+
+	assert.NoError(t, s.lendTerminal(0))
+	assert.That(t, lent, "queries should pass through during the handover")
+	assert.That(t, !s.mon.lent.Load(), "and be stripped again after it")
 }
 
 func TestHandOverFailsWhenTheTerminalWont(t *testing.T) {
@@ -93,7 +115,7 @@ func TestHandOverStopsWhenInterrupted(t *testing.T) {
 	s.done = done
 	s.sleep = s.realSleep
 
-	assert.ErrorIs(t, s.lendTerminal(0), errInterrupted)
+	assert.ErrorIs(t, s.lendTerminal(s.mon.marked()), errInterrupted)
 }
 
 // The handed-over command waits on the keyboard rather than the clock, and
@@ -101,7 +123,6 @@ func TestHandOverStopsWhenInterrupted(t *testing.T) {
 func TestTypeAllHandsOverOnlyTheMarkedCommand(t *testing.T) {
 	s, rec := newTestSession(t)
 	s.cmdTimeout = time.Minute
-	s.mon.head = []byte("nano f")
 	promptsOnEnter(s, rec)
 
 	lent := 0
@@ -109,7 +130,7 @@ func TestTypeAllHandsOverOnlyTheMarkedCommand(t *testing.T) {
 
 	nano := cmd("nano f")
 	nano.handover = true
-	assert.NoError(t, s.typeAll(&script{commands: []command{nano, cmd("echo after")}}, 0))
+	assert.NoError(t, s.typeAll(&script{commands: []command{nano, cmd("echo after")}}))
 	assert.EqualArrays(t, typedLines(rec), []string{"nano f\n", "echo after\n"})
 	assert.Equal(t, lent, 1)
 	assert.ContainsString(t, warnings(s), "yours")
@@ -120,7 +141,6 @@ func TestTypeAllHandsOverOnlyTheMarkedCommand(t *testing.T) {
 func TestTypeAllHandsOverAfterTheLastLine(t *testing.T) {
 	s, rec := newTestSession(t)
 	s.cmdTimeout = time.Minute
-	s.mon.head = []byte("python3 \\")
 	promptsOnEnter(s, rec)
 
 	lentAfter := -1
@@ -128,7 +148,7 @@ func TestTypeAllHandsOverAfterTheLastLine(t *testing.T) {
 
 	assert.NoError(t, s.typeAll(&script{commands: []command{
 		{lines: []string{"python3 \\", "  -q"}, handover: true},
-	}}, 0))
+	}}))
 	assert.Equal(t, lentAfter, len(rec.events), "should be lent only once everything is typed")
 }
 
@@ -154,11 +174,6 @@ func (s *syncWriter) String() string {
 // await blocks until want has arrived, so a test doesn't race the pump.
 func (s *syncWriter) await(t *testing.T, want string) {
 	t.Helper()
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
-		if s.String() == want {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("keyboard input never arrived: want %q, got %q", want, s.String())
+	assert.Eventually(t, func() bool { return s.String() == want }, 2*time.Second, time.Millisecond,
+		"keyboard input never arrived: want %q, got %q", want, s.String())
 }

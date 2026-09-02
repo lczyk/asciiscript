@@ -1,3 +1,5 @@
+//go:build !windows
+
 package main
 
 import (
@@ -41,9 +43,6 @@ func capture(t *testing.T, script string, o options) []event {
 	o.Args.Script, o.Args.Outfile = "", out
 	o.Quiet = true // don't spray the recorded session over the test output
 	o.Jitter = 0   // uniform typing: nothing here is testing the timing model
-	if o.Settle == 0 {
-		o.Settle = 2000
-	}
 	if o.ExitTimeout == 0 {
 		o.ExitTimeout = 10000
 	}

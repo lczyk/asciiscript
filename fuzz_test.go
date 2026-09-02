@@ -1,3 +1,5 @@
+//go:build !windows
+
 package main
 
 import (
@@ -48,6 +50,7 @@ func FuzzMirrorTally(f *testing.F) {
 	f.Add(mark.probe[:len(mark.probe)-1]+"!", 1)
 	f.Add("asciiscript=0123456789abcdee", 5) // one byte off the token
 	f.Add(strings.Repeat(one, 9), 4096)
+	f.Add(`\[\e]133;D;$?;`+mark.probe+`\a\]`, 1) // PS1 as the shell would echo it, unexpanded
 
 	f.Fuzz(func(t *testing.T, stream string, chunk int) {
 		if chunk < 1 || chunk > 1<<16 || len(stream) > 1<<16 {
@@ -56,7 +59,7 @@ func FuzzMirrorTally(f *testing.F) {
 		m := &mirror{quiet: true, mark: mark}
 		m.run(&chunked{s: stream, n: chunk})
 
-		if got, want := m.marked(), strings.Count(stream, mark.probe); got != want {
+		if got, want := m.marked(), len(mark.strip.FindAllStringIndex(stream, -1)); got != want {
 			t.Fatalf("counted %d markers in %q at chunk size %d, want %d", got, stream, chunk, want)
 		}
 	})
@@ -136,6 +139,13 @@ func FuzzParseScript(f *testing.F) {
 	f.Add("echo \"a << b\"\n\n\necho c\n")
 	f.Add("#$ bogus\n")
 	f.Add("cat <<EOF\n") // heredoc that never terminates
+	f.Add("cat <<END-OF-FILE\nbody\nEND-OF-FILE\n")
+	f.Add("cat <<\\EOF\nbody\nEOF\n")
+	f.Add("cat <<A <<B\nbody a\nA\nbody b\nB\n")
+	f.Add("echo $'don\\'t stop'\n")
+	f.Add("echo a;#comment\n")
+	f.Add("#$ delay -5\na\n")
+	f.Add("#$ delay 9223372036854775807\na\n")
 
 	f.Fuzz(func(t *testing.T, text string) {
 		if len(text) > 1<<16 {
@@ -147,6 +157,7 @@ func FuzzParseScript(f *testing.F) {
 			case strings.Contains(err.Error(), errUnknownCtrl.Error()),
 				strings.Contains(err.Error(), errNoArgs.Error()),
 				strings.Contains(err.Error(), errBadArg.Error()),
+				strings.Contains(err.Error(), errArgRange.Error()),
 				strings.Contains(err.Error(), errDangling.Error()),
 				strings.Contains(err.Error(), errUnterminated.Error()):
 				return

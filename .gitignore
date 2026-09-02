@@ -1,6 +1,5 @@
 /asciiscript
+/asciiscript.exe
 /bin/
-*.sh
-!/examples/*.sh
+/*.sh
 *.cast
-/version_gen.go

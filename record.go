@@ -1,20 +1,26 @@
+//go:build !windows
+
 package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"os"
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/creack/pty"
+	"golang.org/x/term"
 )
 
 // promptMarker is an invisible tag the recorded shell's prompts carry so a run
@@ -23,16 +29,17 @@ import (
 // terminals that implement semantic prompts read it as one (and get the exit
 // status for free), the rest ignore it, and either way it occupies no columns.
 //
-// The token is unique per run because the sequence also ends up in the .cast,
-// and a recording of asciiscript replayed inside asciiscript would otherwise
-// announce prompts that never happened.
+// The token is per run because the sequence also ends up in the .cast, and a
+// recording of asciiscript replayed inside asciiscript would otherwise announce
+// prompts that never happened. It comes off the seed rather than a second rng,
+// so a take pinned with --seed carries the same marker as the one it repeats.
 type promptMarker struct {
-	probe string         // plain-text tag counted in the shell's output
-	strip *regexp.Regexp // the whole sequence, for keeping the live echo clean
+	probe string         // plain-text tag inside the sequence
+	strip *regexp.Regexp // the whole sequence as the shell emits it
 }
 
-func newPromptMarker() promptMarker {
-	return promptMarkerFor(fmt.Sprintf("%016x", rand.Uint64()))
+func newPromptMarker(seed int64) promptMarker {
+	return promptMarkerFor(fmt.Sprintf("%016x", uint64(seed)))
 }
 
 // promptMarkerFor builds the marker for a given token. Split out from
@@ -51,34 +58,84 @@ func (p promptMarker) prefix() string {
 	return `\[\e]133;D;$?;` + p.probe + `\a\]`
 }
 
+// promptPwd is abbrevPwd as a bash function (bash 3.2, which macOS ships),
+// for the prompt: a full \w from a deep directory wraps an 80-column recording.
+const promptPwd = `__asciiscript_pwd() {
+	local p=$PWD out='' seg
+	case $p in
+		"$HOME") p='~' ;;
+		"$HOME"/*) p="~${p#"$HOME"}" ;;
+	esac
+	while [[ $p == */* ]]; do
+		seg=${p%%/*} p=${p#*/}
+		[[ $seg == .?* ]] && out+=${seg:0:2}/ || out+=${seg:0:1}/
+	done
+	printf '%s' "$out$p"
+}
+`
+
+// abbrevPwd shortens a working directory the way fish's prompt_pwd does: ~ for
+// home, every parent cut to its first letter (a dot and a letter for a dotdir),
+// the last component in full -- ~/g/asciiscript.
+func abbrevPwd(path, home string) string {
+	if path == home {
+		return "~"
+	}
+	if rest, ok := strings.CutPrefix(path, home+"/"); ok && home != "" {
+		path = "~/" + rest
+	}
+	parts := strings.Split(path, "/")
+	for i, seg := range parts[:len(parts)-1] {
+		keep := 1
+		if strings.HasPrefix(seg, ".") {
+			keep = 2
+		}
+		if r := []rune(seg); len(r) > keep {
+			parts[i] = string(r[:keep])
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
 // bashRC is a minimal bash config for demos: a coloured prompt and nothing else
 // -- no user dotfiles, no surprises. PS2 carries the marker as well as PS1, so
 // continuation lines (heredoc bodies, trailing backslashes) are waited on like
-// any other line rather than sitting out the timeout.
+// any other line rather than sitting out the timeout. Both are read-only: a
+// script that sets its own prompt would otherwise silently take the marker
+// with it, and every line after would wait out the whole timeout.
 func bashRC(m promptMarker) string {
-	return "PS1='" + m.prefix() + `\[\e[1;34m\]\w\[\e[0m\]\$ ` + "'\n" +
-		"PS2='" + m.prefix() + `> ` + "'\n"
+	return promptPwd +
+		"PS1='" + m.prefix() + `\[\e[1;34m\]$(__asciiscript_pwd)\[\e[0m\]\$ ` + "'\n" +
+		"PS2='" + m.prefix() + `> ` + "'\n" +
+		"readonly PS1 PS2\n"
 }
 
-// bashCommand builds the command asciinema runs: a clean bash that loads a
-// minimal coloured prompt from a temp rcfile (no user dotfiles) and silences
-// the macOS deprecation banner. The returned cleanup removes the temp rcfile
-// once recording ends.
-func bashCommand(m promptMarker) (cmd string, cleanup func(), err error) {
+// rcfileVar carries the temp rcfile's path to the shell. asciinema runs its
+// --command through `sh -c`, so a path spliced into the command string would
+// need quoting; in the environment it needs none, and the .cast header's
+// `command` field reads the same for every run instead of naming a temp file.
+const rcfileVar = "ASCIISCRIPT_RCFILE"
+
+// bashCommand builds the command asciinema runs -- a clean bash that loads a
+// minimal coloured prompt from a temp rcfile (no user dotfiles) -- and the
+// environment it needs: the rcfile's path, and the macOS deprecation banner
+// silenced. The returned cleanup removes the temp rcfile once recording ends.
+func bashCommand(m promptMarker) (cmd string, env []string, cleanup func(), err error) {
 	cleanup = func() {}
 
 	f, err := os.CreateTemp("", "asciiscript-bashrc-*")
 	if err != nil {
-		return "", cleanup, fmt.Errorf("couldn't create bash rcfile: %w", err)
+		return "", nil, cleanup, fmt.Errorf("couldn't create bash rcfile: %w", err)
 	}
 	if _, err := f.WriteString(bashRC(m)); err != nil {
 		f.Close()
 		os.Remove(f.Name())
-		return "", cleanup, fmt.Errorf("couldn't write bash rcfile: %w", err)
+		return "", nil, cleanup, fmt.Errorf("couldn't write bash rcfile: %w", err)
 	}
 	f.Close()
 	cleanup = func() { os.Remove(f.Name()) }
-	return "env BASH_SILENCE_DEPRECATION_WARNING=1 bash --noprofile --rcfile " + f.Name(), cleanup, nil
+	env = []string{"BASH_SILENCE_DEPRECATION_WARNING=1", rcfileVar + "=" + f.Name()}
+	return `bash --noprofile --rcfile "$` + rcfileVar + `"`, env, cleanup, nil
 }
 
 var oscColorQuery = regexp.MustCompile(`\x1b\]([0-9;]+);\?(\x07|\x1b\\)`)
@@ -112,13 +169,21 @@ type mirror struct {
 	quiet bool
 	mark  promptMarker // prompt marker to tally
 
+	// lent is set while the terminal is handed over. Queries then pass
+	// through to the real terminal, whose replies the keyboard is forwarding;
+	// the rest of the time nothing would forward them, so they're stripped.
+	lent atomic.Bool
+
 	mu    sync.Mutex
 	head  []byte
-	tail  []byte // trailing bytes of the last read, in case a marker straddles two
+	tail  []byte // unmatched trailing bytes of the last read, in case a marker straddles two
 	marks int
 }
 
-const mirrorHeadMax = 64 << 10
+const (
+	mirrorHeadMax = 64 << 10
+	mirrorTailMax = 64 // longer than any marker's prefix, so a split one is still found
+)
 
 func (m *mirror) run(r io.Reader) {
 	buf := make([]byte, 4096)
@@ -144,17 +209,22 @@ func (m *mirror) run(r io.Reader) {
 	}
 }
 
-// tally counts the prompt markers in buf. Reads split wherever the pty happens
-// to fill, so the tail of each one is carried over and rescanned with the next;
-// the carried tail is always shorter than a marker, so nothing counts twice.
+// tally counts the prompt markers in buf -- whole sequences only, since the
+// probe text on its own is what `echo "$PS1"` prints. Reads split wherever the
+// pty happens to fill, so what follows the last match is carried over and
+// rescanned with the next; nothing already matched is, so nothing counts twice.
 // Called with m.mu held.
 func (m *mirror) tally(buf []byte) {
-	probe := []byte(m.mark.probe)
 	b := make([]byte, 0, len(m.tail)+len(buf))
 	b = append(b, m.tail...)
 	b = append(b, buf...)
-	m.marks += bytes.Count(b, probe)
-	m.tail = append(m.tail[:0], b[len(b)-min(len(probe)-1, len(b)):]...)
+	end := 0
+	for _, loc := range m.mark.strip.FindAllIndex(b, -1) {
+		m.marks++
+		end = loc[1]
+	}
+	keep := b[max(end, len(b)-mirrorTailMax):]
+	m.tail = append(m.tail[:0], keep...)
 }
 
 // marked reports how many prompts the recorded shell has printed so far.
@@ -169,19 +239,32 @@ func (m *mirror) marked() int {
 // split across two reads passes through intact, which the terminal handles
 // fine, whereas half of one would leave a dangling escape sequence.
 func (m *mirror) clean(buf []byte) []byte {
-	return m.mark.strip.ReplaceAll(stripQueries(buf), nil)
+	if !m.lent.Load() {
+		buf = stripQueries(buf)
+	}
+	return m.mark.strip.ReplaceAll(buf, nil)
 }
 
-// saw reports whether text has appeared in asciinema's output so far.
-func (m *mirror) saw(text string) bool {
+// seen is how much of asciinema's output has been kept so far; a point to
+// look back from with sawAfter.
+func (m *mirror) seen() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return bytes.Contains(m.head, []byte(text))
+	return len(m.head)
+}
+
+// sawAfter reports whether text has appeared in asciinema's output since the
+// point from.
+func (m *mirror) sawAfter(text string, from int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return bytes.Contains(m.head[min(from, len(m.head)):], []byte(text))
 }
 
 const (
 	echoProbeLen = 8                      // short enough not to straddle a line wrap
-	echoGrace    = 500 * time.Millisecond // how long the echo gets to come back
+	echoGrace    = 500 * time.Millisecond // how long the first line's echo gets to come back
+	startTimeout = 15 * time.Second       // how long the recorded shell gets to show its first prompt
 	killGrace    = 2 * time.Second        // shutdown budget after an interrupt
 	syncPoll     = 20 * time.Millisecond  // how often to check for a new prompt
 )
@@ -208,17 +291,22 @@ type session struct {
 	pty    io.WriteCloser  // pty master; keystrokes get written here
 	jitter *jitter         // plans the human-like keystroke timing
 	mon    *mirror         // asciinema's output, watched for our own keystrokes
-	done   <-chan struct{} // closed on SIGINT/SIGTERM
+	done   <-chan struct{} // closed on SIGINT/SIGTERM/SIGHUP
 
 	// cmdTimeout is how long a typed line gets to finish before typing carries
-	// on anyway.
+	// on anyway; echoGrace how long the first line's echo gets to show up.
 	cmdTimeout time.Duration
+	echoGrace  time.Duration
 	warn       io.Writer // where warnings go; never the pty, which is being recorded
 	keys       *keyboard // the real terminal's input, on loan during a handover
 
 	// raw puts the real terminal into raw mode for the duration of a handover
 	// and returns the undo. Tests swap it out for one without a terminal.
 	raw func() (func(), error)
+
+	// resize sizes the recording to the real terminal, for a handover in
+	// progress when that terminal changes shape. Nil without a terminal.
+	resize func()
 
 	// sleep waits between keystrokes and commands, giving up early if the run
 	// is interrupted. Tests swap it out to replay a script without waiting.
@@ -227,11 +315,12 @@ type session struct {
 
 func newSession() *session {
 	s := &session{
-		speed:  1,
-		jitter: newJitter(0, 0),
-		mon:    &mirror{},
-		warn:   os.Stderr,
-		keys:   &keyboard{in: os.Stdin},
+		speed:     1,
+		jitter:    newJitter(0, 0),
+		mon:       &mirror{},
+		echoGrace: echoGrace,
+		warn:      os.Stderr,
+		keys:      &keyboard{in: os.Stdin},
 	}
 	s.sleep = s.realSleep
 	s.raw = s.rawStdin
@@ -281,45 +370,43 @@ func (s *session) typeLine(line string, delay, pause time.Duration) error {
 	return nil
 }
 
+// awaitPrompt blocks until the recorded shell has printed more prompts than
+// before -- until the line just typed has finished, in other words. before is
+// the count from just before that line was typed, so the prompt already on
+// screen at the time doesn't satisfy the wait. With a timeout the wait gives
+// up after that long and reports false; without one it waits as long as it
+// takes.
+func (s *session) awaitPrompt(before int, timeout time.Duration) (bool, error) {
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
+	for s.mon.marked() <= before {
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return false, nil
+		}
+		if err := s.sleep(syncPoll); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
 // confirmEcho waits for the first line typed to come back from the recorded
-// shell. asciinema doesn't forward input for a second or two after launch, so
-// too small a --settle means every keystroke lands in the void: the recording
-// comes out empty and the shell never gets told to end either. Checking the
-// first line turns that into an error instead of a silent take.
-func (s *session) confirmEcho(line string, settle time.Duration) error {
+// shell, looking only at output from after the line went in. asciinema is
+// forwarding input by the time the first prompt shows, but one that wasn't
+// would swallow the whole take without a word -- the recording would come out
+// empty and the shell never be told to end. Checking the first line turns
+// that into an error instead of a silent take.
+func (s *session) confirmEcho(line string, from int) error {
 	probe := echoProbe(line)
 	if probe == "" {
 		return nil
 	}
-	deadline := time.Now().Add(echoGrace)
-	for !s.mon.saw(probe) {
+	deadline := time.Now().Add(s.echoGrace)
+	for !s.mon.sawAfter(probe, from) {
 		if time.Now().After(deadline) {
-			return fmt.Errorf("the first command never echoed back -- asciinema wasn't ready for input yet; raise --settle (currently %s)", settle)
-		}
-		if err := s.sleep(20 * time.Millisecond); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// syncPrompt blocks until the recorded shell offers another prompt -- until the
-// line just typed has finished, in other words. before is the marker count from
-// just before that line was typed, so the prompt already on screen at the time
-// doesn't satisfy the wait.
-//
-// A command that never returns to a prompt of its own accord -- an editor, a
-// pager, anything reading stdin -- can't be waited for, because the input that
-// would end it is the input being held back. Those run the timeout out, say so,
-// and get typed over anyway.
-func (s *session) syncPrompt(line string, before int) error {
-	deadline := time.Now().Add(s.cmdTimeout)
-	for s.mon.marked() <= before {
-		if time.Now().After(deadline) {
-			fmt.Fprintf(s.warn,
-				"asciiscript: %q hasn't finished after %s -- typing on regardless; if it holds the terminal (an editor, a pager) put `#$ handover` in front of it\n",
-				line, s.cmdTimeout)
-			return nil
+			return errors.New("the first line typed never echoed back -- asciinema took the keystrokes but didn't forward them to the shell")
 		}
 		if err := s.sleep(syncPoll); err != nil {
 			return err
@@ -328,16 +415,32 @@ func (s *session) syncPrompt(line string, before int) error {
 	return nil
 }
 
-// typeAll gives asciinema time to warm up, then types every command in order,
-// each line waited on before the next. The shell prints its prompt almost
-// immediately, but asciinema doesn't start forwarding keystrokes to it for
-// ~1-2s after launch -- type sooner and the first commands land in the void and
-// never make it into the recording. Watching for the prompt doesn't help (it
-// shows up long before input forwarding is live), so the settle is a plain
-// fixed wait and confirmEcho checks afterwards that it was long enough.
-func (s *session) typeAll(sc *script, settle time.Duration) error {
-	if err := s.sleep(settle); err != nil {
+// syncPrompt waits for the line just typed to finish. A command that never
+// returns to a prompt of its own accord -- an editor, a pager, anything reading
+// stdin -- can't be waited for, because the input that would end it is the
+// input being held back. Those run the timeout out, say so, and get typed over
+// anyway.
+func (s *session) syncPrompt(line string, before int) error {
+	ok, err := s.awaitPrompt(before, s.cmdTimeout)
+	if err == nil && !ok {
+		fmt.Fprintf(s.warn,
+			"asciiscript: %q hasn't finished after %s -- typing on regardless; if it holds the terminal (an editor, a pager) put `#$ handover` in front of it\n",
+			line, s.cmdTimeout)
+	}
+	return err
+}
+
+// typeAll waits for the recorded shell's first prompt, then types every command
+// in order, each line waited on before the next. The prompt is the signal that
+// asciinema is up and forwarding input: type before it and the keystrokes
+// either land in the void or come back echoed twice.
+func (s *session) typeAll(sc *script) error {
+	ok, err := s.awaitPrompt(0, startTimeout)
+	if err != nil {
 		return err
+	}
+	if !ok {
+		return fmt.Errorf("the recorded shell showed no prompt within %s -- asciinema didn't start it", startTimeout)
 	}
 	for i, c := range sc.commands {
 		if c.handover {
@@ -350,12 +453,12 @@ func (s *session) typeAll(sc *script, settle time.Duration) error {
 			if j == 0 {
 				pause = c.pause
 			}
-			before := s.mon.marked()
+			before, from := s.mon.marked(), s.mon.seen()
 			if err := s.typeLine(line, c.delay, pause); err != nil {
 				return err
 			}
 			if i == 0 && j == 0 {
-				if err := s.confirmEcho(line, settle); err != nil {
+				if err := s.confirmEcho(line, from); err != nil {
 					return err
 				}
 			}
@@ -405,34 +508,48 @@ func finish(cmd *exec.Cmd, w io.Writer, timeout time.Duration) error {
 	case <-t.C:
 		_ = cmd.Process.Kill()
 		<-waited
-		return fmt.Errorf("asciinema didn't stop within %s of the session being ended -- the script probably left something holding the terminal (a pager, an unterminated quote, an interactive command)", timeout)
+		return fmt.Errorf("asciinema didn't stop within %s of the session being ended -- something was still holding the terminal (a pager, an unterminated quote, an interactive command, or whatever was running when the take was interrupted)", timeout)
 	}
+}
+
+// warnWideLines points out the script lines that will wrap at the recording's
+// width, behind a prompt as wide as the one the take starts with. readline
+// handles a wrap itself -- a carriage return and a redraw -- and that lands in
+// the .cast, where it only renders right at the width it was recorded at.
+// Counts runes, so a double-width character is undercounted.
+func warnWideLines(sc *script, cols uint16, prompt string, w io.Writer) {
+	limit := int(cols) - utf8.RuneCountInString(prompt)
+	var wide []string
+	for _, c := range sc.commands {
+		for _, line := range c.lines {
+			if utf8.RuneCountInString(line) > limit {
+				wide = append(wide, line)
+			}
+		}
+	}
+	if len(wide) == 0 {
+		return
+	}
+	more := ""
+	if n := len(wide) - 1; n > 0 {
+		more = fmt.Sprintf(" (and %d more)", n)
+	}
+	fmt.Fprintf(w, "asciiscript: %q is likely to wrap at %d columns%s -- a wrapped line plays back cleanly only at the width it was recorded at (asciinema play -r)\n",
+		wide[0], cols, more)
 }
 
 // record records the script to outfile by hosting `asciinema rec` inside a pty
 // and injecting keystrokes into it. asciinema sees a real terminal, so it runs
 // interactively and forwards our keystrokes to the shell it records.
 func record(sc *script, o *options) error {
-	s := newSession()
-	if o.Speed <= 0 {
-		return fmt.Errorf("--speed must be greater than 0 (got %g)", o.Speed)
+	if err := o.validate(); err != nil {
+		return err
 	}
+	s := newSession()
 	s.speed = o.Speed
 
-	if o.Jitter < 0 {
-		return fmt.Errorf("--jitter must be >= 0 (got %g)", o.Jitter)
-	}
-	if o.Settle < 0 {
-		return fmt.Errorf("--settle must be >= 0 (got %d)", o.Settle)
-	}
-	if o.CmdTimeout <= 0 {
-		return fmt.Errorf("--cmd-timeout must be greater than 0 (got %d)", o.CmdTimeout)
-	}
-	if o.ExitTimeout <= 0 {
-		return fmt.Errorf("--exit-timeout must be greater than 0 (got %d)", o.ExitTimeout)
-	}
 	handover := sc.hasHandover()
-	if err := checkHandover(handover, o); err != nil {
+	if err := checkHandover(handover, o, term.IsTerminal(int(os.Stdin.Fd()))); err != nil {
 		return err
 	}
 	seed := time.Now().UnixNano()
@@ -442,14 +559,15 @@ func record(sc *script, o *options) error {
 	if o.Jitter > 0 {
 		// the seed only matters when jitter is active; print it so a good take
 		// can be reproduced with --seed.
-		fmt.Fprintf(os.Stderr, "asciiscript: jitter %g (seed %d)\n", o.Jitter, seed)
+		fmt.Fprintf(s.warn, "asciiscript: jitter %g (seed %d)\n", o.Jitter, seed)
 	}
 	s.jitter = newJitter(o.Jitter, seed)
 
 	// A signal has to unwind through the defers below: killed halfway, the run
-	// would leave the temp rcfile behind and asciinema still recording.
+	// would leave the temp rcfile behind and asciinema still recording. SIGHUP
+	// is the terminal window closing, which is the same thing.
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigs)
 	done := make(chan struct{})
 	returned := make(chan struct{})
@@ -463,29 +581,40 @@ func record(sc *script, o *options) error {
 	}()
 	s.done = done
 
-	marker := newPromptMarker()
+	marker := newPromptMarker(seed)
 	s.cmdTimeout = time.Duration(o.CmdTimeout) * time.Millisecond
 	s.mon.mark = marker
 
-	shellCmd, cleanup, err := bashCommand(marker)
+	shellCmd, env, cleanup, err := bashCommand(marker)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	cmd := exec.Command(
-		"asciinema", "rec",
+	args := []string{
+		"rec",
 		"--quiet", // suppress asciinema's own !!!/::: diagnostics
 		"--overwrite",
 		"--command", shellCmd,
-		o.Args.Outfile,
-	)
+	}
+	if o.IdleTimeLimit > 0 {
+		args = append(args, "--idle-time-limit", strconv.FormatFloat(o.IdleTimeLimit, 'f', -1, 64))
+	}
+	if o.Title != "" {
+		args = append(args, "--title", o.Title)
+	}
+	args = append(args, o.Args.Outfile)
+	cmd := exec.Command("asciinema", args...)
+	cmd.Env = append(os.Environ(), env...)
 
-	cols, rows := termSize(o)
+	cols, rows := termSize(o, handover)
 	if handover {
 		if ws, err := pty.GetsizeFull(os.Stdin); err == nil && (ws.Cols != cols || ws.Rows != rows) {
 			fmt.Fprintf(s.warn, "asciiscript: recording at %dx%d but this terminal is %dx%d -- a handed-over command will draw itself to the wrong size\n", cols, rows, ws.Cols, ws.Rows)
 		}
+	}
+	if wd, err := os.Getwd(); err == nil {
+		warnWideLines(sc, cols, abbrevPwd(wd, os.Getenv("HOME"))+"$ ", s.warn)
 	}
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: cols, Rows: rows})
 	if err != nil {
@@ -493,11 +622,14 @@ func record(sc *script, o *options) error {
 	}
 	s.pty = ptmx
 	defer ptmx.Close()
+	if handover {
+		s.resize = func() { _ = pty.InheritSize(os.Stdin, ptmx) }
+	}
 
 	s.mon.quiet = o.Quiet
 	go s.mon.run(ptmx)
 
-	typed := s.typeAll(sc, time.Duration(o.Settle)*time.Millisecond)
+	typed := s.typeAll(sc)
 
 	// Stop the recording either way: on an interrupt or a half-typed script,
 	// asciinema still has to be told to stop and flush what it has.
@@ -505,10 +637,5 @@ func record(sc *script, o *options) error {
 	if typed != nil {
 		grace = killGrace
 	}
-	stopped := finish(cmd, ptmx, grace)
-
-	if typed != nil {
-		return typed
-	}
-	return stopped
+	return errors.Join(typed, finish(cmd, ptmx, grace))
 }
