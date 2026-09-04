@@ -234,7 +234,7 @@ $ asciiscript --seed 4821 demo.sh demo.cast        # reproduce a specific take
 - A script is typed byte for byte, but the session's *output* is written as UTF-8, so anything
   that isn't comes out as U+FFFD in the recording -- as asciinema would have it.
 - `--version` reports the version the binary was built from: the git tag for a build at one
-  (`go install ...@v0.6.0` included), a pseudo-version with the commit otherwise, `+dirty`
+  (`go install ...@v0.6.1` included), a pseudo-version with the commit otherwise, `+dirty`
   when the tree had uncommitted changes, and the `VERSION` file's number where there is no
   git at all.
 
