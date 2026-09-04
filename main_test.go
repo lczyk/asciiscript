@@ -140,24 +140,6 @@ func TestValidateRejectsEachBadFlag(t *testing.T) {
 	}
 }
 
-func TestAsciinemaMajor(t *testing.T) {
-	for _, tc := range []struct {
-		out   string
-		major int
-		ok    bool
-	}{
-		{"asciinema 3.2.1\n", 3, true},
-		{"asciinema 2.4.0", 2, true},
-		{"asciinema 3.0.0-rc.1 (Rust)", 3, true},
-		{"", 0, false},
-		{"asciinema", 0, false},
-	} {
-		major, ok := asciinemaMajor(tc.out)
-		assert.Equal(t, ok, tc.ok, tc.out)
-		assert.Equal(t, major, tc.major, tc.out)
-	}
-}
-
 // The README's Flags block is written by hand, so the one thing that can be
 // checked is that every flag is in it.
 func TestReadmeListsEveryFlag(t *testing.T) {

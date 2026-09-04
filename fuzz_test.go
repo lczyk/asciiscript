@@ -3,11 +3,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"math"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // Fuzz targets for the parts that take input asciiscript doesn't control: a
@@ -228,4 +231,133 @@ func subsequence(small, large string) bool {
 		}
 	}
 	return i == len(small)
+}
+
+// A recording must not depend on how the pty happened to chunk its output:
+// feeding the same bytes through in one piece or in small pieces has to
+// reassemble to the same text.
+func FuzzCastChunking(f *testing.F) {
+	f.Add([]byte{}, 1)
+	f.Add([]byte("hello, world\n"), 3)
+	f.Add([]byte("caf\xc3\xa9"), 1)           // e-acute, a two-byte rune
+	f.Add([]byte("\xe4\xb8\xad"), 2)          // the CJK ideograph U+4E2D, a three-byte rune
+	f.Add([]byte("\xf0\x9f\x98\x80"), 3)      // an emoji, a four-byte rune
+	f.Add(bytes.Repeat([]byte{0xff}, 3), 1)   // a run of invalid bytes
+	f.Add([]byte{0xe4, 0xb8}, 1)              // truncated at the very end
+	f.Add(append([]byte{0xe4, 0xb8}, 'A'), 1) // truncated, then ascii
+
+	f.Fuzz(func(t *testing.T, stream []byte, chunk int) {
+		if chunk < 1 || chunk > 1<<16 || len(stream) > 1<<16 {
+			t.Skip()
+		}
+
+		one := castRecording(t, stream, len(stream)+1)
+		pieces := castRecording(t, stream, chunk)
+
+		if got, want := outputData(t, pieces), outputData(t, one); got != want {
+			t.Fatalf("chunk size %d decoded to %q, want %q", chunk, got, want)
+		}
+		// Valid UTF-8 goes into the file as it came, whatever the chunking.
+		if got := outputData(t, one); utf8.Valid(stream) && got != string(stream) {
+			t.Fatalf("decoded to %q, want the input %q", got, stream)
+		}
+		for _, l := range castLines(t, pieces) {
+			if !utf8.ValidString(l.data) {
+				t.Fatalf("chunk size %d: %q is not valid UTF-8", chunk, l.data)
+			}
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(pieces)), "\n") {
+			if !json.Valid([]byte(line)) {
+				t.Fatalf("chunk size %d: line %q is not valid JSON", chunk, line)
+			}
+		}
+	})
+}
+
+// The carry that keeps quantised intervals tracking the real clock must hold
+// for any sequence of steps, not just the evenly spaced ones the unit tests use.
+func FuzzCastIntervals(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{0})
+	f.Add([]byte{1, 1, 1})
+	f.Add([]byte{255, 0, 255, 0})
+	f.Add(bytes.Repeat([]byte{13}, 50)) // ~1.3ms steps, like the 1000-event unit test
+	f.Add([]byte{255, 255, 255})
+
+	f.Fuzz(func(t *testing.T, steps []byte) {
+		if len(steps) > 4096 {
+			t.Skip()
+		}
+		deltas := make([]time.Duration, len(steps))
+		for i, b := range steps {
+			deltas[i] = time.Duration(b) * 100 * time.Microsecond
+		}
+
+		var buf bytes.Buffer
+		c, err := newCastWriter(&buf, minimalHeader, clockFrom(time.Now(), deltas...))
+		if err != nil {
+			t.Fatalf("newCastWriter: %v", err)
+		}
+		for range steps {
+			if err := c.marker("x"); err != nil {
+				t.Fatalf("marker: %v", err)
+			}
+		}
+		if err := c.close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+
+		gaps := castGaps(t, buf.Bytes())
+		var sumMS, trueMS float64
+		for i, gap := range gaps {
+			if gap < 0 {
+				t.Fatalf("negative interval %v at event %d", gap, i)
+			}
+			ms := gap * 1000
+			frac := ms - math.Trunc(ms)
+			if frac > 1e-6 && frac < 1-1e-6 {
+				t.Fatalf("interval %vs at event %d is not a whole millisecond", gap, i)
+			}
+			sumMS += ms
+			trueMS += float64(deltas[i]) / float64(time.Millisecond)
+			// The float64 round trip through JSON text adds noise far below
+			// a millisecond; the epsilon absorbs that, not the property.
+			if math.Abs(sumMS-trueMS) > 0.5+1e-6 {
+				t.Fatalf("running sum %.4fms strayed from true %.4fms by more than 0.5ms at event %d", sumMS, trueMS, i)
+			}
+		}
+	})
+}
+
+// appendJSONString must escape whatever sanitiseUTF8 hands it into a string
+// encoding/json can parse back unchanged, with no raw control byte loose in
+// the line for a terminal to act on.
+func FuzzCastEscape(f *testing.F) {
+	f.Add("")
+	f.Add("hello\n\t\r")
+	f.Add("quoted \" and \\backslash\\")
+	f.Add("<script>&amp;</script>")
+	f.Add("unicode: \u00e9\u4e2d\U0001f600")
+	f.Add("\xff\x80") // not valid UTF-8
+
+	f.Fuzz(func(t *testing.T, s string) {
+		if len(s) > 1<<16 {
+			t.Skip()
+		}
+		clean := sanitiseUTF8([]byte(s))
+		line := appendJSONString(nil, clean)
+
+		var decoded string
+		if err := json.Unmarshal(line, &decoded); err != nil {
+			t.Fatalf("appendJSONString(%q) = %q, which encoding/json won't parse: %v", clean, line, err)
+		}
+		if decoded != clean {
+			t.Fatalf("appendJSONString(%q) round-tripped to %q", clean, decoded)
+		}
+		for _, b := range line {
+			if b < 0x20 {
+				t.Fatalf("appendJSONString(%q) = %q, which has a raw control byte", clean, line)
+			}
+		}
+	})
 }

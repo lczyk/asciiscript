@@ -5,14 +5,14 @@ Create [asciicasts](https://asciinema.org) without your fingers getting in the w
 Ever tried to record the perfect demo, but couldn't stop missing keys and having to restart?
 `asciiscript` lets you record pre-scripted terminal sessions that look human.
 
-It hosts `asciinema rec` inside a pty and injects your script keystroke-by-keystroke, so
-asciinema records a real, interactive session with human-looking typing and real command output.
-Targets asciinema 3.x (asciicast v3).
+It runs `bash` inside a pty, injects your script keystroke-by-keystroke, and records what comes
+back: a real, interactive session with human-looking typing and real command output, written as
+an [asciicast v3](https://docs.asciinema.org/manual/asciicast/v3/) for asciinema to play.
 
 ## Install
 
-Needs Go, `bash`, and the [asciinema](https://asciinema.org) 3.x CLI on `PATH`. macOS and Linux;
-it doesn't run on Windows, since the recording is hosted in a Unix pty.
+Needs Go and `bash`; the [asciinema](https://asciinema.org) CLI (3.x) to play what you record.
+macOS and Linux; it doesn't run on Windows, since the recording is hosted in a Unix pty.
 
 ```sh
 $ go install github.com/lczyk/asciiscript@latest
@@ -79,7 +79,7 @@ other. That works, but every physical line is its own command to asciiscript: bl
 the block are skipped, and a control line inside it applies to the next line of the block.
 
 Scripts run in a clean `bash` -- a minimal coloured prompt from a throwaway rcfile, no user
-dotfiles, macOS deprecation banner silenced -- so demos come out consistent. The prompt shows
+dotfiles, no readline, macOS deprecation banner silenced -- so demos come out consistent. The prompt shows
 the working directory the way fish's `prompt_pwd` does (`~/g/asciiscript`), so a deep path
 doesn't wrap it, and it's read-only: `PS1` is how asciiscript follows the session along (see
 [Waiting](#waiting)), so a script can't set its own. Everything else in the environment --
@@ -103,10 +103,13 @@ gotchas worth knowing before you write your own.
                cap on idle time between events in playback, in seconds, written
                into the recording (default: none)
     --title    title written into the recording
+    --capture-input
+               record the keystrokes the script types as input events (a
+               handover's never are)
     --cmd-timeout
                ms a command gets to finish before typing carries on (default 600000)
     --exit-timeout
-               ms to wait for asciinema to stop once the session is ended
+               ms to wait for the shell to exit once the session is ended
                (default 10000)
 -v, --version  print the version and exit
 ```
@@ -119,11 +122,9 @@ $ asciiscript --title "Installing it" --idle-time-limit 2 demo.sh demo.cast
 The script can also come from standard input, as `-`.
 
 The recording is 80x24 unless told otherwise, whatever terminal it's made from: a recording is
-for other people's screens, and one that only looks right on yours is no good. In particular,
-a line that wraps -- the prompt plus the command wider than the recording -- is written into
-the .cast the way readline redraws it, which only comes out right when it's played back at the
-width it was recorded at (`asciinema play -r` resizes the terminal to match, where the
-terminal allows it). asciiscript warns about such lines at the start of a take.
+for other people's screens. Nothing in it depends on that size, though: the recorded shell
+runs without readline, so what's typed is echoed by the terminal itself and a long line wraps
+wherever the recording is played, not where it was made.
 
 ## Waiting
 
@@ -133,11 +134,16 @@ ten minutes. Pass `--idle-time-limit 2` to have players compress the dead air to
 (it's a field in the recording, not a change to it). Control lines cost nothing themselves;
 only typed commands get a pause.
 
+A `#$ pause` in front of a command also leaves a marker in the recording, named after that
+command and placed where the typing resumes: `asciinema play -m` pauses at each one, and `]`
+skips to the next. The pause at the very end of a script has no command to name one after, so
+it gets none.
+
 This works by giving the recorded shell's prompt an invisible marker (an OSC 133 sequence,
 carrying a token unique to the run) and watching for it. `PS2` carries it too, so the lines
 of a heredoc or a `\`-continued command are each waited for like anything else. The first
-prompt is what starts the typing: it's the sign that asciinema is up and forwarding input,
-which it isn't for the first second or so after launch.
+prompt is what starts the typing: it's the sign that bash has loaded its rcfile and is
+listening.
 
 The exception is a command that never returns to a prompt by itself -- an editor, a pager,
 `ssh`, anything reading stdin. There's nothing to wait for: the keystrokes that would end it
@@ -173,7 +179,7 @@ Worth knowing: `--seed` no longer pins a take once a person is in it. A script w
 handover in it is recorded at your terminal's size rather than 80x24, since the handed-over
 command draws itself to the recording's size and you'll be looking at it through yours; if
 `--cols`/`--rows` say otherwise, asciiscript warns. Resizing the terminal during a handover
-resizes the recording with it.
+resizes the recording with it, and the recording says so, so playback follows.
 
 [`examples/handover.sh`](examples/handover.sh) is a two-minute one to try.
 
@@ -197,38 +203,36 @@ below `1` ease it back toward uniform, and `0` is exactly uniform (a steady `#$ 
 keys, a `#$ pause` to the millisecond). Tune the model's constants in `jitter.go` to taste.
 
 When jitter is on it's driven by a seeded rng, so a run is reproducible: the seed is random by
-default and printed on start (`asciiscript: jitter 1 (seed 12345)`); pass `--seed 12345` to
-replay a take you liked. The typing is then the same to the keystroke; the recording's
-timestamps still come from asciinema's clock, so two takes differ by a millisecond here and
-there.
+default and printed on start (`asciiscript: jitter 1 (seed 4821)`); pass `--seed 4821` to
+replay a take you liked. The typing is then the same to the keystroke; what the commands
+print still lands when it lands, so two takes differ by a millisecond here and there.
 
 ```sh
 $ asciiscript demo.sh demo.cast                    # jittered (default), seed printed
 $ asciiscript --jitter 0.5 demo.sh demo.cast       # subtler
 $ asciiscript --jitter 0 demo.sh demo.cast         # uniform / machine-steady
-$ asciiscript --seed 12345 demo.sh demo.cast       # reproduce a specific take
+$ asciiscript --seed 4821 demo.sh demo.cast        # reproduce a specific take
 ```
 
 ## Notes
 
-- Requires the `asciinema` 3.x CLI on `PATH`, and checks its version on start. The output is
-  asciicast v3.
+- The output is asciicast v3, written by asciiscript itself; nothing but `bash` is needed to
+  record. The header carries the size, the time, `--title` and `--idle-time-limit`, and
+  `SHELL` as the bash that ran; a `#$ pause` before a command is an `m` event, a handover
+  resize an `r` event, and the last event is `x` with the shell's exit status.
 - The output file is overwritten if it already exists.
-- asciinema is run with `--quiet`, and the recorded session's terminal queries (colour
-  palette, cursor position, ...) are stripped from the live mirror -- otherwise the terminal's
-  replies leak onto your shell prompt once recording ends. During a handover they go through,
-  since you're there to have them answered.
-- The first line typed is checked for its echo, so an asciinema that took the keystrokes
-  without forwarding them stops the run with an error rather than writing an empty recording.
+- The recorded session's terminal queries (colour palette, cursor position, ...) are stripped
+  from the live mirror -- otherwise the terminal's replies leak onto your shell prompt once
+  recording ends. During a handover they go through, since you're there to have them
+  answered. The recording has them as they were.
 - The session is ended the way you'd end one by hand: end-of-input (ctrl-d) at the prompt,
   which bash answers with its own `exit`. Anything still holding the terminal at that point --
-  a pager, a command reading stdin -- swallows it, so asciinema is given `--exit-timeout` to
-  stop and is killed after that.
+  a pager, a command reading stdin -- swallows it, so the shell is given `--exit-timeout` to
+  exit and is killed after that.
 - `Ctrl-C` (or the terminal window closing) stops the recording rather than abandoning it:
-  asciinema is told to stop so it can flush what it has, and the temporary rcfile is cleaned
-  up.
-- A script is typed byte for byte, but asciinema writes the session's *output* as UTF-8, so
-  anything that isn't comes out as U+FFFD in the recording.
+  the shell is ended, what it printed is written out, and the temporary rcfile is cleaned up.
+- A script is typed byte for byte, but the session's *output* is written as UTF-8, so anything
+  that isn't comes out as U+FFFD in the recording -- as asciinema would have it.
 - `--version` reports the version the binary was built from: the git tag for a build at one
   (`go install ...@v0.5.0` included), a pseudo-version with the commit otherwise, `+dirty`
   when the tree had uncommitted changes, and the `VERSION` file's number where there is no

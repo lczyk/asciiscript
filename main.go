@@ -3,14 +3,10 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
-	"os/exec"
-	"strconv"
-	"strings"
 
 	"github.com/creack/pty"
 	flags "github.com/jessevdk/go-flags"
@@ -27,9 +23,10 @@ type options struct {
 
 	IdleTimeLimit float64 `long:"idle-time-limit" description:"cap on idle time between events in playback, in seconds, written into the recording (default: none)"`
 	Title         string  `long:"title" description:"title written into the recording"`
+	CaptureInput  bool    `long:"capture-input" description:"record the keystrokes the script types as input events (a handover's never are)"`
 
 	CmdTimeout  int `long:"cmd-timeout" default:"600000" description:"ms to wait for a command to finish before typing on regardless"`
-	ExitTimeout int `long:"exit-timeout" default:"10000" description:"ms to wait for asciinema to stop once the session is ended"`
+	ExitTimeout int `long:"exit-timeout" default:"10000" description:"ms to wait for the shell to exit once the session is ended"`
 
 	Version bool `short:"v" long:"version" description:"print the version and exit"`
 
@@ -41,7 +38,7 @@ type options struct {
 
 // validate rejects flag values a recording can't be made with. It runs before
 // anything else is looked at, so a bad flag is reported as such rather than
-// masked by a missing script or a missing asciinema.
+// masked by a missing script.
 func (o *options) validate() error {
 	switch {
 	case o.Cols < 0 || o.Cols > 65535:
@@ -87,9 +84,6 @@ func main() {
 	if err := opts.validate(); err != nil {
 		log.Fatal(err)
 	}
-	if err := checkAsciinema(); err != nil {
-		log.Fatal(err)
-	}
 
 	s, err := loadScriptOrStdin(opts.Args.Script)
 	if err != nil {
@@ -111,43 +105,6 @@ func loadScriptOrStdin(path string) (*script, error) {
 		return nil, err
 	}
 	return parseScript(string(b))
-}
-
-// checkAsciinema makes sure the asciinema on PATH is the 3.x generation the
-// recording is written against. The 2.x CLI takes the same flags, so a
-// mismatch would otherwise surface halfway through a take.
-func checkAsciinema() error {
-	if _, err := exec.LookPath("asciinema"); err != nil {
-		return errors.New("can't find asciinema executable on PATH")
-	}
-	out, err := exec.Command("asciinema", "--version").Output()
-	if err != nil {
-		var exit *exec.ExitError
-		if errors.As(err, &exit) && len(exit.Stderr) > 0 {
-			return fmt.Errorf("asciinema --version failed: %s", strings.TrimSpace(string(exit.Stderr)))
-		}
-		return fmt.Errorf("asciinema --version failed: %w", err)
-	}
-	major, ok := asciinemaMajor(string(out))
-	switch {
-	case !ok:
-		log.Printf("asciiscript: couldn't tell asciinema's version from %q -- carrying on, 3.x is needed", strings.TrimSpace(string(out)))
-	case major < 3:
-		return fmt.Errorf("asciinema 3.x is needed, but `asciinema --version` says %q", strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// asciinemaMajor reads the major version out of `asciinema --version`'s
-// output, which is "asciinema 3.2.1" or thereabouts.
-func asciinemaMajor(out string) (int, bool) {
-	for _, field := range strings.Fields(out) {
-		major, _, _ := strings.Cut(field, ".")
-		if n, err := strconv.Atoi(major); err == nil && n >= 0 {
-			return n, true
-		}
-	}
-	return 0, false
 }
 
 // termSize resolves the recording window size: what the command line says,

@@ -3,14 +3,12 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -19,40 +17,75 @@ import (
 	"github.com/lczyk/assert"
 )
 
-// The rcfile's path travels in the environment, not the command: asciinema
-// runs the command through `sh -c`, and a path with a space in it would come
-// apart there.
-func TestBashCommand(t *testing.T) {
-	cmd, env, cleanup, err := bashCommand(promptMarker{})
-	assert.NoError(t, err)
-	assert.ContainsString(t, cmd, `--rcfile "$`+rcfileVar+`"`)
-	assert.That(t, slices.Contains(env, "BASH_SILENCE_DEPRECATION_WARNING=1"), "env should silence the macOS banner")
-
-	var path string
-	for _, kv := range env {
-		if p, ok := strings.CutPrefix(kv, rcfileVar+"="); ok {
-			path = p
-		}
+// A seed is four digits: read off the screen, typed back in as --seed.
+func TestRandomSeedIsFourDigits(t *testing.T) {
+	for range 1000 {
+		seed := randomSeed()
+		assert.That(t, seed >= 0 && seed < 10000, "seed %d should have at most four digits", seed)
 	}
-	assert.That(t, path != "", "env should carry the rcfile path")
-	assert.That(t, !strings.Contains(cmd, path), "the command should not name the temp file")
-	_, statErr := os.Stat(path)
-	assert.NoError(t, statErr, "rcfile should exist before cleanup")
+}
+
+func TestWriteRC(t *testing.T) {
+	m := newPromptMarker(7)
+	path, cleanup, err := writeRC(m)
+	assert.NoError(t, err)
+	b, readErr := os.ReadFile(path)
+	assert.NoError(t, readErr, "rcfile should exist before cleanup")
+	assert.Equal(t, string(b), bashRC(m))
 
 	cleanup()
-	_, statErr = os.Stat(path)
+	_, statErr := os.Stat(path)
 	assert.That(t, os.IsNotExist(statErr), "rcfile should be gone after cleanup")
 }
 
-// finish has to report a pty that is already gone, and still reap asciinema.
+// drained stands in for the mirror having read the pty to its end.
+func drained() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
+// finish has to report a pty that is already gone, and still reap the shell.
 func TestFinishReportsAFailedEnd(t *testing.T) {
 	cmd := exec.Command("true")
 	assert.NoError(t, cmd.Start())
 
-	err := finish(cmd, &recorder{err: errors.New("pty is gone")}, 5*time.Second)
+	status, err := finish(cmd, &recorder{err: errors.New("pty is gone")}, drained(), 5*time.Second)
 	assert.Error(t, err, "couldn't end the session")
 	assert.Error(t, err, "pty is gone")
-	assert.That(t, cmd.ProcessState != nil, "asciinema should still have been waited for")
+	assert.That(t, cmd.ProcessState != nil, "the shell should still have been waited for")
+	assert.Equal(t, status, 0)
+}
+
+// How the shell ended is what the recording's last event says: the exit code,
+// or 128 plus the signal, as $? would have it.
+func TestFinishReportsTheExitStatus(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 7")
+	assert.NoError(t, cmd.Start())
+	status, err := finish(cmd, io.Discard, drained(), 5*time.Second)
+	assert.NoError(t, err)
+	assert.Equal(t, status, 7)
+
+	cmd = exec.Command("sleep", "30")
+	assert.NoError(t, cmd.Start())
+	status, err = finish(cmd, io.Discard, drained(), 50*time.Millisecond)
+	assert.Error(t, err, "didn't exit within")
+	assert.Equal(t, status, 137, "a kill is 128 + SIGKILL")
+}
+
+// The last of the shell's output can arrive after it has exited; finish waits
+// for the mirror to read it, but only for so long.
+func TestFinishWaitsForTheDrainBriefly(t *testing.T) {
+	cmd := exec.Command("true")
+	assert.NoError(t, cmd.Start())
+	never := make(chan struct{})
+
+	start := time.Now()
+	_, err := finish(cmd, io.Discard, never, 5*time.Second)
+	assert.NoError(t, err)
+	took := time.Since(start)
+	assert.That(t, took >= drainGrace, "should have given the drain its grace")
+	assert.That(t, took < 5*time.Second, "but not waited for the exit timeout")
 }
 
 func TestStripQueries(t *testing.T) {
@@ -62,41 +95,6 @@ func TestStripQueries(t *testing.T) {
 
 func TestStripQueriesNoQuery(t *testing.T) {
 	assert.Equal(t, string(stripQueries([]byte("plain text\r\n"))), "plain text\r\n")
-}
-
-func TestEchoProbe(t *testing.T) {
-	assert.Equal(t, echoProbe("echo hello world\n"), "echo hel")
-	assert.Equal(t, echoProbe("ls\n"), "ls")
-	assert.Equal(t, echoProbe("   \n"), "")
-	assert.Equal(t, echoProbe("\n"), "")
-}
-
-func TestMirrorSawAfter(t *testing.T) {
-	m, _ := newMarkedMirror(t)
-	m.run(strings.NewReader("prompt$ echo hi\r\nhi\r\n"))
-	assert.That(t, m.sawAfter("echo hi", 0), "should have seen the echoed command")
-	assert.That(t, !m.sawAfter("echo bye", 0), "should not see what was never typed")
-
-	// Only output from the point on counts.
-	assert.That(t, !m.sawAfter("echo hi", m.seen()), "should not see what came before")
-	assert.That(t, !m.sawAfter("echo hi", m.seen()+100), "a point past the end is the end")
-}
-
-// `exit` only reaches bash if bash is the one reading the terminal; anything
-// still holding it swallows the bytes, so the wait needs a deadline.
-func TestFinishKillsWhatWontStop(t *testing.T) {
-	cmd := exec.Command("sleep", "30")
-	assert.NoError(t, cmd.Start())
-
-	err := finish(cmd, io.Discard, 50*time.Millisecond)
-	assert.Error(t, err, "didn't stop within")
-}
-
-func TestFinishWaitsForACleanExit(t *testing.T) {
-	cmd := exec.Command("true")
-	assert.NoError(t, cmd.Start())
-
-	assert.NoError(t, finish(cmd, io.Discard, 5*time.Second))
 }
 
 // The marker is the seed's, so a take pinned with --seed carries the same one
@@ -159,33 +157,7 @@ func TestBashRCAbbreviatesTheWorkingDirectory(t *testing.T) {
 		out, err := cmd.Output()
 		assert.NoError(t, err, tc.dir)
 		assert.Equal(t, string(out), tc.want, tc.dir)
-		assert.Equal(t, abbrevPwd(tc.dir, home), tc.want, tc.dir) // the Go twin, for the width estimate
 	}
-}
-
-// A line that will wrap is called out with the width it wraps at; the rest
-// are counted. What counts as wrapping depends on the prompt in front.
-func TestWarnWideLines(t *testing.T) {
-	sc := &script{commands: []command{
-		cmd("ls"),
-		cmd(strings.Repeat("x", 70)),
-		{lines: []string{"cat <<EOF", strings.Repeat("y", 79), "EOF"}},
-	}}
-
-	var w bytes.Buffer
-	warnWideLines(sc, 80, "~/g/asciiscript$ ", &w)
-	assert.ContainsString(t, w.String(), strings.Repeat("x", 70))
-	assert.ContainsString(t, w.String(), "80 columns")
-	assert.ContainsString(t, w.String(), "(and 1 more)")
-
-	w.Reset()
-	warnWideLines(sc, 80, "$ ", &w)
-	assert.ContainsString(t, w.String(), strings.Repeat("y", 79))
-	assert.That(t, !strings.Contains(w.String(), "more"), "only one line is too wide behind a short prompt")
-
-	w.Reset()
-	warnWideLines(sc, 100, "~/g/asciiscript$ ", &w)
-	assert.Equal(t, w.String(), "")
 }
 
 // emitted is one prompt as the recorded shell writes it: the marker with its
@@ -252,29 +224,6 @@ func TestMirrorCleanLeavesOrdinaryOutput(t *testing.T) {
 	assert.Equal(t, string(mon.clean([]byte(line))), line)
 }
 
-func TestConfirmEchoFailsWhenNothingComesBack(t *testing.T) {
-	s, _ := newTestSession(t)
-	s.echoGrace = time.Millisecond
-	err := s.confirmEcho("echo hi", 0)
-	assert.Error(t, err, "never echoed back")
-}
-
-func TestConfirmEchoPassesOnEcho(t *testing.T) {
-	s, _ := newTestSession(t)
-	s.mon.head = []byte("$ echo hi\r\nhi\r\n")
-	assert.NoError(t, s.confirmEcho("echo hi", 0))
-}
-
-// The shell's own startup output -- its prompt shows the working directory --
-// can carry the probe by chance, so only what came after the line was typed
-// counts as its echo.
-func TestConfirmEchoIgnoresWhatCameBefore(t *testing.T) {
-	s, _ := newTestSession(t)
-	s.echoGrace = time.Millisecond
-	s.mon.head = []byte("~/tools$ ")
-	assert.Error(t, s.confirmEcho("ls", s.mon.seen()), "never echoed back")
-}
-
 // Each pause belongs to the gap *before* its keystroke, so typeLine must wait
 // it out and only then write. Typing first would shift every digraph and
 // word-boundary pause one key late.
@@ -282,7 +231,7 @@ func TestTypeLineWaitsBeforeEachKeystroke(t *testing.T) {
 	s, rec := newTestSession(t)
 	plan := newJitter(1, 7).plan("ab\n", 40*time.Millisecond, 0)
 
-	assert.NoError(t, s.typeLine("ab", 40*time.Millisecond, 0))
+	assert.NoError(t, s.typeLine("ab", 40*time.Millisecond, 0, nil))
 
 	assert.EqualArrays(t, rec.events, []string{
 		"s:" + plan[0].pause.String(), "w:a",
@@ -298,7 +247,7 @@ func TestTypeLineScalesWithSpeed(t *testing.T) {
 	s.jitter = newJitter(0, 1)
 	s.speed = 2
 
-	assert.NoError(t, s.typeLine("ab", 40*time.Millisecond, 500*time.Millisecond))
+	assert.NoError(t, s.typeLine("ab", 40*time.Millisecond, 500*time.Millisecond, nil))
 	assert.EqualArrays(t, rec.events, []string{
 		"s:250ms", "w:a", "s:20ms", "w:b", "s:20ms", "w:\n",
 	})
@@ -308,7 +257,7 @@ func TestTypeLineReturnsWriteError(t *testing.T) {
 	s, rec := newTestSession(t)
 	rec.err = errors.New("pty is gone")
 
-	err := s.typeLine("echo hi", 0, 0)
+	err := s.typeLine("echo hi", 0, 0, nil)
 	assert.Error(t, err, "writing to pty failed")
 }
 
@@ -320,7 +269,7 @@ func TestTypeLineStopsWhenInterrupted(t *testing.T) {
 	s.done = done
 	s.sleep = s.realSleep
 
-	assert.ErrorIs(t, s.typeLine("echo hi", 0, 0), errInterrupted)
+	assert.ErrorIs(t, s.typeLine("echo hi", 0, 0, nil), errInterrupted)
 }
 
 func TestRealSleepInterrupted(t *testing.T) {
@@ -378,25 +327,15 @@ func TestSyncPromptStopsWhenInterrupted(t *testing.T) {
 	assert.ErrorIs(t, s.syncPrompt("sleep 1", s.mon.marked()), errInterrupted)
 }
 
-// promptsOnEnter makes the recorder stand in for the shell: each line is
-// echoed as it's typed, and a prompt follows once it has been typed in full.
+// promptsOnEnter makes the recorder stand in for the shell: one prompt per
+// line, and only once that line has been typed in full.
 func promptsOnEnter(s *session, rec *recorder) {
 	rec.onWrite = func(p string) {
-		s.mon.mu.Lock()
-		s.mon.head = append(s.mon.head, p...)
 		if p == "\n" {
+			s.mon.mu.Lock()
 			s.mon.marks++
+			s.mon.mu.Unlock()
 		}
-		s.mon.mu.Unlock()
-	}
-}
-
-// echoesOnEnter is a shell that echoes what's typed but never prompts again.
-func echoesOnEnter(s *session, rec *recorder) {
-	rec.onWrite = func(p string) {
-		s.mon.mu.Lock()
-		s.mon.head = append(s.mon.head, p...)
-		s.mon.mu.Unlock()
 	}
 }
 
@@ -411,8 +350,8 @@ func TestTypeAllWaitsForEachCommand(t *testing.T) {
 	assert.Equal(t, warnings(s), "")
 }
 
-// Nothing is typed until the shell has shown a prompt: that is when asciinema
-// is up and forwarding input, and no fixed wait can know when that is.
+// Nothing is typed until the shell has shown a prompt: that is when the rcfile
+// has loaded and readline is listening, and no fixed wait can know when that is.
 func TestTypeAllWaitsForTheFirstPrompt(t *testing.T) {
 	s, rec := newTestSession(t)
 	s.cmdTimeout = time.Minute
@@ -439,7 +378,6 @@ func TestTypeAllWaitsForTheFirstPrompt(t *testing.T) {
 func TestTypeAllTypesOnAfterTheTimeout(t *testing.T) {
 	s, rec := newTestSession(t)
 	s.cmdTimeout = time.Millisecond
-	echoesOnEnter(s, rec)
 
 	assert.NoError(t, s.typeAll(&script{commands: []command{cmd("nano f"), cmd("b")}}))
 	assert.EqualArrays(t, typedLines(rec), []string{"nano f\n", "b\n"})
@@ -523,7 +461,6 @@ func TestTypeAllHoldsTheNextLineUntilThePromptComesBack(t *testing.T) {
 	const runtime = 50 * time.Millisecond
 	rec.onWrite = func(p string) {
 		s.mon.mu.Lock()
-		s.mon.head = append(s.mon.head, p...)
 		s.mon.mu.Unlock()
 		if p != "\n" {
 			return
@@ -541,4 +478,108 @@ func TestTypeAllHoldsTheNextLineUntilThePromptComesBack(t *testing.T) {
 
 	assert.That(t, time.Since(start) >= 2*runtime, "both lines should have waited on their own prompt")
 	assert.EqualArrays(t, typedLines(rec), []string{"first\n", "second\n"})
+}
+
+// castInto is a recording written to a file under t's temp dir with a clock
+// that never moves, so the events' order is all that varies.
+func castInto(t *testing.T, s *session) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "take.cast")
+	f, err := os.Create(path)
+	assert.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+	at := time.Unix(0, 0)
+	cast, err := newCastWriter(f, castHeader{Term: castTerm{Cols: 80, Rows: 24}}, func() time.Time { return at })
+	assert.NoError(t, err)
+	s.cast, s.mon.cast = cast, cast
+	t.Cleanup(func() { _ = cast.close() })
+	return path
+}
+
+// A `#$ pause` puts a marker in the recording where the typing resumes, named
+// after the command, so a player can jump from one paused command to the next.
+// It lands after the pause and before the first keystroke -- with the typed
+// keys recorded as well, that is between the previous line's newline and the
+// paused command's first letter.
+func TestTypeAllMarksAPausedCommand(t *testing.T) {
+	s, rec := newTestSession(t)
+	s.cmdTimeout = time.Minute
+	s.captureInput = true
+	promptsOnEnter(s, rec)
+	path := castInto(t, s)
+
+	sc, err := parseScript("echo a\n#$ pause 500\necho b\necho c\n")
+	assert.NoError(t, err)
+	assert.NoError(t, s.typeAll(sc))
+	assert.NoError(t, s.cast.exit(0))
+	assert.NoError(t, s.cast.close())
+
+	events := readCast(t, path)
+	var markers []int
+	for i, e := range events {
+		if e.kind == "m" {
+			markers = append(markers, i)
+		}
+	}
+	assert.Len(t, markers, 1, "one paused command, one marker")
+	m := markers[0]
+	assert.Equal(t, events[m].data, "echo b")
+	assert.Equal(t, events[m-1].kind+events[m-1].data, "i\n", "the marker follows the previous command's newline")
+	assert.Equal(t, events[m+1].kind+events[m+1].data, "ie", "and precedes the paused command's first key")
+}
+
+// Keystrokes go into the recording only when asked for.
+func TestTypeAllRecordsInputOnlyWhenAsked(t *testing.T) {
+	for _, capture := range []bool{false, true} {
+		s, rec := newTestSession(t)
+		s.cmdTimeout = time.Minute
+		s.captureInput = capture
+		promptsOnEnter(s, rec)
+		path := castInto(t, s)
+
+		assert.NoError(t, s.typeAll(&script{commands: []command{cmd("echo hi")}}))
+		assert.NoError(t, s.cast.exit(0))
+		assert.NoError(t, s.cast.close())
+
+		var typed strings.Builder
+		for _, e := range readCast(t, path) {
+			if e.kind == "i" {
+				typed.WriteString(e.data)
+			}
+		}
+		if capture {
+			assert.Equal(t, typed.String(), "echo hi\n")
+		} else {
+			assert.Equal(t, typed.String(), "")
+		}
+	}
+}
+
+// A recording that can't be written any more is not worth typing the rest of
+// the script into.
+func TestTypeAllStopsWhenTheRecordingFails(t *testing.T) {
+	s, rec := newTestSession(t)
+	s.cmdTimeout = time.Minute
+	promptsOnEnter(s, rec)
+	castInto(t, s)
+	s.cast.err = errors.New("disk full")
+
+	err := s.typeAll(&script{commands: []command{cmd("echo a"), cmd("echo b")}})
+	assert.Error(t, err, "disk full")
+	assert.Len(t, typedLines(rec), 0)
+}
+
+// The mirror tees what it reads into the recording before anything is
+// stripped from the live echo: the recording is the session as it was.
+func TestMirrorWritesTheRecording(t *testing.T) {
+	s, _ := newTestSession(t)
+	s.mon.mark = newPromptMarker(7)
+	s.mon.quiet = true
+	path := castInto(t, s)
+
+	s.mon.run(strings.NewReader(emitted(s.mon.mark, 0) + "$ \x1b[6nhi\r\n"))
+	assert.NoError(t, s.cast.close())
+
+	got := output(readCast(t, path))
+	assert.Equal(t, got, emitted(s.mon.mark, 0)+"$ \x1b[6nhi\r\n")
 }

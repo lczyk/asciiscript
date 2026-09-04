@@ -67,4 +67,4 @@ Working list from the September 2026 design review. Ticked as it lands.
 
 ## Later
 
-- [ ] write asciicast v3 directly and host bash ourselves (drops asciinema as a runtime dependency, exact timestamps, `m`/`i` events) -- the 0.5 theme
+- [x] write asciicast v3 directly and host bash ourselves (drops asciinema as a runtime dependency, exact timestamps, `m`/`i` events) -- the 0.5 theme

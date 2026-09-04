@@ -6,7 +6,10 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -176,4 +179,44 @@ func (s *syncWriter) await(t *testing.T, want string) {
 	t.Helper()
 	assert.Eventually(t, func() bool { return s.String() == want }, 2*time.Second, time.Millisecond,
 		"keyboard input never arrived: want %q, got %q", want, s.String())
+}
+
+// A resize while the terminal is on loan reaches the recording as a resize
+// event: lendTerminal watches for SIGWINCH and calls the session's resize,
+// which is where the pty is sized and the event written.
+func TestHandOverRecordsAResize(t *testing.T) {
+	s, _ := newTestSession(t)
+	s.raw = func() (func(), error) { return func() {}, nil }
+	s.mon.marks = 0
+	path := castInto(t, s)
+
+	var resized atomic.Bool
+	s.resize = func() {
+		_ = s.cast.resize(100, 40)
+		resized.Store(true)
+	}
+	sent := false
+	s.sleep = func(time.Duration) error {
+		if !sent {
+			sent = true
+			assert.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGWINCH))
+		}
+		if resized.Load() {
+			s.mon.marks = 1
+		}
+		time.Sleep(time.Millisecond)
+		return nil
+	}
+
+	assert.NoError(t, s.lendTerminal(0))
+	assert.NoError(t, s.cast.exit(0))
+	assert.NoError(t, s.cast.close())
+
+	var sizes []string
+	for _, e := range readCast(t, path) {
+		if e.kind == "r" {
+			sizes = append(sizes, e.data)
+		}
+	}
+	assert.EqualArrays(t, sizes, []string{"100x40"})
 }

@@ -14,9 +14,9 @@ import (
 )
 
 // The unit tests drive script against a fake pty and a fake clock, which leaves
-// the part that only exists in a real terminal -- asciinema, the pty, the bash
-// rcfile and the prompt marker that ties them together -- unexercised. These
-// tests record for real and read the .cast back.
+// the part that only exists in a real terminal -- the pty, bash, the rcfile and
+// the prompt marker that ties them together -- unexercised. These tests record
+// for real and read the .cast back.
 
 // event is one asciicast v3 event. Times in the file are the gap since the
 // previous event; at is that accumulated into seconds from the start.
@@ -27,20 +27,16 @@ type event struct {
 	data string
 }
 
-// capture runs a script through a real `asciinema rec` and returns the events it
-// wrote. Skipped rather than failed where asciinema isn't installed: the rest of
-// the suite has no such dependency and shouldn't grow one.
+// capture records a script for real -- a bash in a pty -- and returns the
+// events written.
 func capture(t *testing.T, script string, o options) []event {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("records for real, which takes seconds")
 	}
-	if _, err := exec.LookPath("asciinema"); err != nil {
-		t.Skip("asciinema isn't on PATH")
-	}
 
 	out := filepath.Join(t.TempDir(), "out.cast")
-	o.Args.Script, o.Args.Outfile = "", out
+	o.Args.Script, o.Args.Outfile = "demo.sh", out
 	o.Quiet = true // don't spray the recorded session over the test output
 	o.Jitter = 0   // uniform typing: nothing here is testing the timing model
 	if o.ExitTimeout == 0 {
@@ -199,4 +195,114 @@ func TestTrailingPauseHoldsTheLastPrompt(t *testing.T) {
 func formatSeconds(f float64) string {
 	b, _ := json.Marshal(f)
 	return string(b) + "s"
+}
+
+// readHeader is the recording's first line.
+func readHeader(t *testing.T, path string) map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	assert.NoError(t, err)
+	line, _, _ := strings.Cut(string(b), "\n")
+	var header map[string]any
+	assert.NoError(t, json.Unmarshal([]byte(line), &header))
+	return header
+}
+
+// The last event is how the shell exited: end-of-input at the prompt exits
+// with the last command's status.
+func TestExitStatusIsRecorded(t *testing.T) {
+	events := capture(t, "false\n", options{})
+	last := events[len(events)-1]
+	assert.Equal(t, last.kind, "x")
+	assert.Equal(t, last.data, "1")
+}
+
+// A `#$ pause` is a marker in the recording, after the paused-for output and
+// before the paused command is typed.
+func TestPauseBecomesAMarker(t *testing.T) {
+	events := capture(t, "echo alpha\n#$ pause 300\necho bravo\n", options{})
+	m := -1
+	for i, e := range events {
+		if e.kind == "m" {
+			assert.Equal(t, m, -1, "only one command was paused")
+			m = i
+		}
+	}
+	assert.That(t, m > 0, "the pause should have left a marker")
+	assert.Equal(t, events[m].data, "echo bravo")
+	assert.ContainsString(t, output(events[:m]), "alpha\r\n")
+	assert.That(t, !strings.Contains(output(events[:m]), "echo bravo"), "the marker comes before the paused command is typed")
+	assert.ContainsString(t, output(events[m:]), "bravo\r\n")
+}
+
+func TestHeaderDescribesTheTake(t *testing.T) {
+	if testing.Short() {
+		t.Skip("records for real")
+	}
+	out := filepath.Join(t.TempDir(), "out.cast")
+	sc, err := parseScript("echo hi\n")
+	assert.NoError(t, err)
+	assert.NoError(t, record(sc, &options{
+		Quiet: true, Jitter: 0, Speed: 4, CmdTimeout: 600000, ExitTimeout: 10000,
+		Title: "a take", IdleTimeLimit: 1.5,
+		Args: struct {
+			Script  string `positional-arg-name:"script" description:"script to type, or - for stdin"`
+			Outfile string `positional-arg-name:"outfile" description:"output .cast file"`
+		}{Script: "examples/demo.sh", Outfile: out},
+	}))
+
+	h := readHeader(t, out)
+	assert.Equal(t, h["version"].(float64), 3)
+	term := h["term"].(map[string]any)
+	assert.Equal(t, term["cols"].(float64), 80)
+	assert.Equal(t, term["rows"].(float64), 24)
+	assert.Equal(t, h["title"].(string), "a take")
+	assert.Equal(t, h["idle_time_limit"].(float64), 1.5)
+	assert.Equal(t, h["command"].(string), "asciiscript demo.sh")
+	assert.That(t, h["timestamp"].(float64) > 0, "the take is dated")
+	assert.That(t, strings.HasSuffix(h["env"].(map[string]any)["SHELL"].(string), "bash"), "the shell is the bash that ran")
+}
+
+// The keystrokes the script types can be recorded as input events; a viewer
+// then sees what was typed as well as what came back.
+func TestCaptureInputRecordsTheKeystrokes(t *testing.T) {
+	events := capture(t, "echo hi\n", options{CaptureInput: true})
+	var typed strings.Builder
+	for _, e := range events {
+		if e.kind == "i" {
+			typed.WriteString(e.data)
+		}
+	}
+	assert.Equal(t, typed.String(), "echo hi\n")
+}
+
+// asciinema is the player the recording is for; where it's installed, it has
+// to accept what was written.
+func TestAsciinemaReadsTheRecording(t *testing.T) {
+	if testing.Short() {
+		t.Skip("records for real")
+	}
+	if _, err := exec.LookPath("asciinema"); err != nil {
+		t.Skip("asciinema isn't on PATH")
+	}
+	out := filepath.Join(t.TempDir(), "out.cast")
+	sc, err := parseScript("echo alpha\n#$ pause 200\necho 'b<r>&avo'\n")
+	assert.NoError(t, err)
+	assert.NoError(t, record(sc, &options{
+		Quiet: true, Jitter: 0, Speed: 4, CmdTimeout: 600000, ExitTimeout: 10000, CaptureInput: true,
+		Args: struct {
+			Script  string `positional-arg-name:"script" description:"script to type, or - for stdin"`
+			Outfile string `positional-arg-name:"outfile" description:"output .cast file"`
+		}{Script: "demo.sh", Outfile: out},
+	}))
+
+	txt, err := exec.Command("asciinema", "convert", "-q", "-f", "txt", out, "-").Output()
+	assert.NoError(t, err, "asciinema convert should accept the recording")
+	assert.ContainsString(t, string(txt), "alpha")
+	assert.ContainsString(t, string(txt), "b<r>&avo")
+
+	again := filepath.Join(t.TempDir(), "again.cast")
+	_, err = exec.Command("asciinema", "convert", "-q", "--overwrite", out, again).Output()
+	assert.NoError(t, err, "asciinema should round-trip the recording")
+	assert.Equal(t, output(readCast(t, again)), output(readCast(t, out)))
 }

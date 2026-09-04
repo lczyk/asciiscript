@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--capture-input`: the keystrokes the script types are recorded as input events. A
+  handover's never are.
+- A `#$ pause` in front of a command is a marker in the recording, named after that command;
+  `asciinema play -m` pauses there. The trailing pause at the end of a script has no command
+  and gets no marker.
+- A resize during a handover is recorded as a resize event.
+
+### Changed
+
+- asciiscript writes the asciicast v3 file itself: bash runs directly in the pty, and the
+  session's output is timestamped and written by asciiscript. asciinema is no longer needed to
+  record, only to play. The recording's header names the shell that ran and the script;
+  intervals are rounded the way asciinema rounds them.
+- `--exit-timeout` is how long the shell gets to exit, not asciinema.
+- The seed printed on start is four digits, so it can be read off the screen and typed back.
+- The recorded shell runs without readline. The terminal echoes what is typed, so a line that
+  wraps does so wherever the recording is played rather than at the width it was made, and a
+  tab in a script is typed as a tab rather than completed.
+
+### Removed
+
+- The asciinema version check on start, and the first-line echo check: there is nothing
+  between asciiscript and the shell any more.
+- The warning about lines that would wrap, since wrapping no longer ties a recording to a
+  width.
+
+## [0.5.0] - 2026-09-02
+
+### Added
+
 - `--idle-time-limit` and `--title`, written into the recording.
 - The script can be `-` for standard input.
 - A warning at the start of a take for lines that will wrap at the recording's width, since a
