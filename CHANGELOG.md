@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is recorded with and be run directly: `#!/usr/bin/env -S asciiscript --cols 100`.
 - The outfile is optional: without one the recording takes the script's name, `demo.sh` to
   `demo.cast`. A script read from stdin still needs one named.
+- `#$ silent`: the command under it is run without being typed and stays out of the recording
+  and off the live echo alike, the time it takes included -- the recording's clock is held for
+  the duration, so playback skips straight over it. For a demo's housekeeping. It can't be
+  combined with `#$ delay`, `#$ pause` or `#$ handover`.
+- A silent command and a handover are both reported on the terminal the recording is being made
+  from, since neither is visible in the recording itself.
 
 ### Changed
 

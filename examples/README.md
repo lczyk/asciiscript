@@ -53,6 +53,10 @@ $ asciiscript --seed 4821 examples/git.sh out.cast       # reproduce a take you 
 - **Mind the `!`.** The recorded shell is interactive, so history expansion is on and
   `echo "done!"` dies with `bash: !": event not found`. Single-quote the string, or start the
   script with `set +H`.
+- **Housekeeping goes under `#$ silent`.** Clearing a scratch directory, exporting a variable,
+  pulling an image: the command runs but is neither typed nor recorded nor echoed to your own
+  screen, and the time it takes is held off the recording's clock, so playback skips straight
+  over it. What it did is reported on an `asciiscript:` line instead.
 - **`#$ pause` is breathing room, not a runtime guess.** Each command is typed only once the
   previous one has finished, so a slow build needs no padding -- `#$ pause` is the extra beat
   on top, for letting output be read. One at the end of the script holds the final prompt

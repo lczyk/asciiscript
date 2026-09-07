@@ -54,7 +54,7 @@ $ asciiscript demo.sh demo.cast
 $ asciinema play demo.cast
 ```
 
-Three control lines, each for the one command written under it:
+Four control lines, each for the one command written under it:
 
 - `#$ delay N` -- time between keypresses (typing speed) for that command, in ms. Default 40.
 - `#$ pause N` -- how long to sit at the prompt before typing that command, in ms. By default
@@ -65,10 +65,12 @@ Three control lines, each for the one command written under it:
   long before the session ends.
 - `#$ handover` -- give that command to whoever is running the recording. Takes no argument
   (see [Handover](#handover)).
+- `#$ silent` -- run that command without typing it, and keep it out of the recording
+  entirely, the time it takes included. Takes no argument (see [Silent](#silent)).
 
 Both numbers must be between 0 and an hour.
 
-`#$|` is the fourth, and belongs to no command: the line is a note to whoever reads the script,
+`#$|` is the fifth, and belongs to no command: the line is a note to whoever reads the script,
 dropped before anything is typed. Every other line is typed, ordinary `#` comments included --
 which is often what you want, since they narrate the recording -- so `#$|` is how a line stays
 out of it.
@@ -77,7 +79,8 @@ A command is usually one line. A heredoc, a line ending in `\`, or a quote left 
 to the following lines, and asciiscript reads those the way bash does: as part of the same
 command, every line literal -- blank lines and `#$` lines included -- and any control lines in
 front apply to the whole of it. A command that never ends (a heredoc missing its terminator, a
-quote never closed) is a parse error, as is a `#$ delay` or `#$ handover` with nothing after it.
+quote never closed) is a parse error, as is a `#$ delay`, `#$ handover` or `#$ silent` with
+nothing after it.
 
 Other multi-line constructs -- `if`/`for`/`while` blocks, `{ }`, `( )`, a line ending in `|` or
 `&&` -- are typed line by line, each waited for at the shell's continuation prompt like any
@@ -177,6 +180,42 @@ The exception is a command that never returns to a prompt by itself -- an editor
 are the ones being held back. Those run out `--cmd-timeout` (10 minutes by default), print a
 warning naming the command, and get typed over anyway. Hand those over (below).
 
+## Silent
+
+`#$ silent` runs the command under it without putting it in the recording. It goes to the shell
+whole rather than a key at a time, is waited for like any other, and neither the line, nor what
+it printed, nor the prompt it lands back on reaches the .cast.
+
+```sh
+#$ silent
+rm -rf demo-scratch && mkdir demo-scratch && cd demo-scratch
+```
+
+The time it takes goes too: the recording's clock is held for the duration, so playback runs
+straight from the last thing on screen to the next thing typed. A silent `docker pull` can take
+a minute and leave no gap at all -- which is the point, since a viewer would only be watching a
+prompt.
+
+That makes it the place for a demo's housekeeping -- clearing a scratch directory, exporting a
+variable, warming a cache -- the parts that have to happen for the take to work but that nobody
+wants to watch. What the take *is about* should be typed.
+
+It is off the screen the take is being made on too, not just the file. The two are the same
+thing: what the recording has is what you watch it record, and the only lines on your terminal
+that the recording doesn't have are asciiscript's own, the ones that start `asciiscript:`.
+
+`#$ delay`, `#$ pause` and `#$ handover` can't go with it, and saying so is a parse error
+rather than a line quietly ignored: there is no typing to time, and nothing to hand over that
+anyone can see.
+
+Which leaves nothing to watch, so asciiscript reports it -- the command, and how long it held
+the clock for:
+
+```
+asciiscript: running "rm -rf demo-scratch && mkdir demo-scratch && cd demo-scratch" silently -- it stays out of the recording
+asciiscript: "rm -rf demo-scratch && mkdir demo-scratch && cd demo-scratch" took 12ms, held back from the recording
+```
+
 ## Handover
 
 `#$ handover` gives the command under it to you. It's typed as usual, and then your keyboard
@@ -196,6 +235,14 @@ apply, because it's waiting on a person.
 Your terminal goes into raw mode for the duration, so ctrl-o, ctrl-c, arrows and the rest
 reach the command rather than being buffered into lines or turned into signals. Which also
 means ctrl-c won't stop asciiscript while a handover is live: quit the command first.
+
+A handover is announced on your terminal the way a silent command is, since the script stopping
+to wait for you is otherwise indistinguishable from it having hung:
+
+```
+asciiscript: the next command is yours -- the script picks up again once it drops you back at a prompt
+asciiscript: the terminal is back -- the script carries on
+```
 
 Two things a handover needs, both checked before the take starts:
 
