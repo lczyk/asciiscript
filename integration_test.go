@@ -245,10 +245,7 @@ func TestHeaderDescribesTheTake(t *testing.T) {
 	assert.NoError(t, record(sc, &options{
 		Quiet: true, Jitter: 0, Speed: 4, CmdTimeout: 600000, ExitTimeout: 10000,
 		Title: "a take", IdleTimeLimit: 1.5,
-		Args: struct {
-			Script  string `positional-arg-name:"script" description:"script to type, or - for stdin"`
-			Outfile string `positional-arg-name:"outfile" description:"output .cast file"`
-		}{Script: "examples/demo.sh", Outfile: out},
+		Args: scriptArgs{Script: "examples/demo.sh", Outfile: out},
 	}))
 
 	h := readHeader(t, out)
@@ -290,10 +287,7 @@ func TestAsciinemaReadsTheRecording(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, record(sc, &options{
 		Quiet: true, Jitter: 0, Speed: 4, CmdTimeout: 600000, ExitTimeout: 10000, CaptureInput: true,
-		Args: struct {
-			Script  string `positional-arg-name:"script" description:"script to type, or - for stdin"`
-			Outfile string `positional-arg-name:"outfile" description:"output .cast file"`
-		}{Script: "demo.sh", Outfile: out},
+		Args: scriptArgs{Script: "demo.sh", Outfile: out},
 	}))
 
 	txt, err := exec.Command("asciinema", "convert", "-q", "-f", "txt", out, "-").Output()

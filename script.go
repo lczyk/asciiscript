@@ -19,6 +19,9 @@ const ctrlPrefix = "#$"
 // else and show up in the recording; these are not.
 const commentMark = "|"
 
+// shebangPrefix opens the first line of a script that is run directly.
+const shebangPrefix = "#!"
+
 // defaultDelay is the per-keystroke delay a command types at unless a
 // `#$ delay` in front of it says otherwise.
 const defaultDelay = 40 * time.Millisecond
@@ -69,6 +72,10 @@ func loadScript(path string) (*script, error) {
 
 // parseScript parses a script from raw script text.
 //
+// A "#!" on the first line is the kernel's, not the shell's, and is dropped
+// rather than typed -- a script can be run directly, with the flags it wants
+// to be recorded at written into its shebang.
+//
 // A command normally is one line. It runs on while a heredoc is open, while a
 // quote is open, or after a line ending in a backslash -- and inside one every
 // line is literal, blank lines and "#$" lines included, because bash will read
@@ -90,6 +97,9 @@ func parseScript(text string) (*script, error) {
 			last := &s.commands[len(s.commands)-1]
 			last.lines = append(last.lines, raw)
 			cont.feed(raw)
+			continue
+		}
+		if i == 0 && strings.HasPrefix(raw, shebangPrefix) {
 			continue
 		}
 		line := strings.TrimSpace(raw)

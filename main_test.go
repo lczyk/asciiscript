@@ -155,3 +155,28 @@ func TestReadmeListsEveryFlag(t *testing.T) {
 		assert.ContainsString(t, string(readme), "--"+long)
 	}
 }
+
+// With no outfile named, the recording takes the script's name -- so a script
+// with a shebang, run directly, writes the .cast beside itself.
+func TestCastNameFollowsTheScript(t *testing.T) {
+	for _, tc := range []struct{ script, want string }{
+		{"demo.sh", "demo.cast"},
+		{"demo", "demo.cast"},
+		{"/tmp/takes/demo.bash", "/tmp/takes/demo.cast"},
+		{"./a.b/demo.sh", "./a.b/demo.cast"},
+	} {
+		got, err := castName(tc.script)
+		assert.NoError(t, err, tc.script)
+		assert.Equal(t, got, tc.want, tc.script)
+	}
+}
+
+// Two scripts have no name to derive one from: stdin has none at all, and a
+// .cast one would derive its own -- and be overwritten by the recording.
+func TestCastNameNeedsAScriptToNameItAfter(t *testing.T) {
+	_, err := castName("-")
+	assert.ErrorIs(t, err, errNoOutfile)
+
+	_, err = castName("demo.cast")
+	assert.Error(t, err, ".cast")
+}

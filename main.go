@@ -3,10 +3,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/creack/pty"
 	flags "github.com/jessevdk/go-flags"
@@ -30,10 +33,32 @@ type options struct {
 
 	Version bool `short:"v" long:"version" description:"print the version and exit"`
 
-	Args struct {
-		Script  string `positional-arg-name:"script" description:"script to type, or - for stdin"`
-		Outfile string `positional-arg-name:"outfile" description:"output .cast file"`
-	} `positional-args:"yes" required:"yes"`
+	Args scriptArgs `positional-args:"yes"`
+}
+
+// scriptArgs are the command line's positional arguments. Only the script is
+// required: without an outfile the recording is named after the script.
+type scriptArgs struct {
+	Script  string `positional-arg-name:"script" required:"yes" description:"script to type, or - for stdin"`
+	Outfile string `positional-arg-name:"outfile" description:"output .cast file (default: the script's name, with .cast)"`
+}
+
+// errNoOutfile is a script read from stdin with no outfile named: there is no
+// script name to derive one from.
+var errNoOutfile = errors.New("reading the script from stdin needs an outfile named")
+
+// castName is the recording a script gets when the command line names none:
+// the script's own path with its extension swapped for .cast, so a script run
+// through a shebang writes the recording beside itself.
+func castName(script string) (string, error) {
+	if script == "-" {
+		return "", errNoOutfile
+	}
+	out := strings.TrimSuffix(script, filepath.Ext(script)) + ".cast"
+	if out == script {
+		return "", fmt.Errorf("the script is itself a %s file, so the recording needs a name of its own", filepath.Ext(script))
+	}
+	return out, nil
 }
 
 // validate rejects flag values a recording can't be made with. It runs before
@@ -83,6 +108,14 @@ func main() {
 
 	if err := opts.validate(); err != nil {
 		log.Fatal(err)
+	}
+
+	if opts.Args.Outfile == "" {
+		out, err := castName(opts.Args.Script)
+		if err != nil {
+			log.Fatal(err)
+		}
+		opts.Args.Outfile = out
 	}
 
 	s, err := loadScriptOrStdin(opts.Args.Script)

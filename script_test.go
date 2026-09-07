@@ -451,3 +451,21 @@ func TestParseScriptDoubleDollarBeforeAQuote(t *testing.T) {
 	assert.Len(t, s.commands, 2)
 	assert.EqualArrays(t, s.commands[0].lines, []string{"echo $$'a\\'b'", "c'"})
 }
+
+// A shebang is how the kernel found asciiscript; the shell never sees it, so
+// it is dropped rather than typed. Only on the first line, and the numbering
+// the parse errors report is untouched by it.
+func TestParseScriptSkipsAShebang(t *testing.T) {
+	s, err := parseScript("#!/usr/bin/env -S asciiscript --cols 100\necho hi\n")
+	assert.NoError(t, err)
+	assert.EqualArrays(t, typed(s), []string{"echo hi"})
+
+	_, err = parseScript("#!/usr/bin/env asciiscript\n#$ delay abc\na\n")
+	assert.ErrorIs(t, err, errBadArg)
+	assert.Error(t, err, "line 2")
+
+	// Anywhere else it is an ordinary comment, and comments are typed.
+	later, err := parseScript("echo hi\n#!not a shebang\n")
+	assert.NoError(t, err)
+	assert.EqualArrays(t, typed(later), []string{"echo hi", "#!not a shebang"})
+}
