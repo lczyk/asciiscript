@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `#$|` script comments: the line is a note to whoever reads the script, not typed into the
+  shell. Ordinary `#` comments are still typed, since they narrate the recording.
 - `--capture-input`: the keystrokes the script types are recorded as input events. A
   handover's never are.
 - A `#$ pause` in front of a command is a marker in the recording, named after that command;

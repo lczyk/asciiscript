@@ -30,6 +30,7 @@ echo "Hello, world..."
 echo "Here's a demo of asciiscript."
 
 # Comments with a '$' are control lines. Each one applies to the next command only.
+#$| A comment with a '|' is a note to the reader: it is not typed into the shell.
 
 #$ delay 100  - Time between keypresses for this command (milliseconds).
 echo "We can type slow..."
@@ -66,6 +67,11 @@ Three control lines, each for the one command written under it:
   (see [Handover](#handover)).
 
 Both numbers must be between 0 and an hour.
+
+`#$|` is the fourth, and belongs to no command: the line is a note to whoever reads the script,
+dropped before anything is typed. Every other line is typed, ordinary `#` comments included --
+which is often what you want, since they narrate the recording -- so `#$|` is how a line stays
+out of it.
 
 A command is usually one line. A heredoc, a line ending in `\`, or a quote left open runs it on
 to the following lines, and asciiscript reads those the way bash does: as part of the same

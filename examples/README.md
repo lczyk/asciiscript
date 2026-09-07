@@ -34,7 +34,8 @@ $ asciiscript --seed 4821 examples/git.sh out.cast       # reproduce a take you 
 
 - **Only `#$` lines are control lines.** Every other line is typed into the shell, ordinary
   `#` comments included -- they show up in the recording. Useful for narration, easy to
-  forget when you write a header comment nobody was meant to see.
+  forget when you write a header comment nobody was meant to see. `#$| like this` is the
+  comment that isn't typed, for the header nobody was meant to see.
 - **A control line is for the one command under it.** `#$ delay 15` types that command fast
   and the next one at the usual pace again; there's nothing to reset. Several control lines in
   front of one command all apply to it.
