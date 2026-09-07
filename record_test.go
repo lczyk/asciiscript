@@ -602,8 +602,8 @@ func TestTypeAllRunsASilentCommandWholeAndUntyped(t *testing.T) {
 	assert.EqualArrays(t, typedLines(rec), []string{"a\n", "rm -rf scratch\n", "b\n"})
 	assert.ContainsString(t, strings.Join(rec.events, "\x00"), "w:rm -rf scratch\n") // one write, not one per key
 	assert.ContainsString(t, warnings(s), "rm -rf scratch")
-	assert.ContainsString(t, warnings(s), "stays out of the recording")
 	assert.ContainsString(t, warnings(s), "held back from the recording")
+	assert.Equal(t, strings.Count(warnings(s), "asciiscript:"), 1, "one line per silent command")
 }
 
 // Nothing a silent command does reaches the recording -- not the line, not its

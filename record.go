@@ -470,11 +470,9 @@ func (s *session) typeAll(sc *script) error {
 // runSilent runs a command without typing it. Each line goes in whole rather
 // than keystroke by keystroke -- there is no typing to watch -- and is waited
 // for like any other. Nothing it does reaches the screen either, so it is
-// reported here instead: an "asciiscript:" line is the one thing the terminal
-// a take is made on has that the take does not.
+// reported here once it is done: an "asciiscript:" line is the one thing the
+// terminal a take is made on has that the take does not.
 func (s *session) runSilent(c command) error {
-	name := c.lines[0]
-	fmt.Fprintf(s.warn, "asciiscript: running %q silently -- it stays out of the recording\n", name)
 	started := time.Now()
 	for _, line := range c.lines {
 		if s.cast != nil {
@@ -490,8 +488,14 @@ func (s *session) runSilent(c command) error {
 			return err
 		}
 	}
-	fmt.Fprintf(s.warn, "asciiscript: %q took %s, held back from the recording\n",
-		name, time.Since(started).Round(time.Millisecond))
+	// The prompt the mirror last echoed has no newline after it, so the line
+	// would otherwise be written onto the end of it.
+	lead := "\n"
+	if s.mon.quiet {
+		lead = ""
+	}
+	fmt.Fprintf(s.warn, "%sasciiscript: %q took %s, held back from the recording\n",
+		lead, c.lines[0], time.Since(started).Round(time.Millisecond))
 	return nil
 }
 
