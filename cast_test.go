@@ -692,3 +692,65 @@ func TestCastNothingFollowsExit(t *testing.T) {
 	assert.Len(t, lines, 2)
 	assert.ContainsString(t, lines[1], `"x"`)
 }
+
+// A muted stretch is in neither the recording nor its timeline: the events go,
+// and the time they took comes off everything after them, so playback runs
+// straight from the last event before the mute to the first one after.
+func TestCastMuteDropsTheEventsAndTheTimeTheyTook(t *testing.T) {
+	var buf bytes.Buffer
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	// The clock is read once each by: the epoch, the first event, mute,
+	// unmute, and the last event. A muted event reads it not at all.
+	c, err := newCastWriter(&buf, minimalHeader, clockFrom(base,
+		100*time.Millisecond, 0, 3*time.Second, 100*time.Millisecond))
+	assert.NoError(t, err)
+
+	assert.NoError(t, c.output([]byte("before")))
+	c.mute()
+	assert.NoError(t, c.output([]byte("hidden")))
+	assert.NoError(t, c.marker("hidden too"))
+	c.unmute()
+	assert.NoError(t, c.output([]byte("after")))
+	assert.NoError(t, c.close())
+
+	assert.EqualArrays(t, castLines(t, buf.Bytes()), []castLine{
+		{"o", "before"}, {"o", "after"},
+	})
+	assert.EqualArrays(t, castGaps(t, buf.Bytes()), []float64{0.1, 0.1},
+		"the three seconds under the mute should not be in the file")
+}
+
+// Muting twice is one hold: a run of silent commands should not have the first
+// one's start forgotten, nor the recording left muted by the second's unmute.
+func TestCastMuteIsIdempotent(t *testing.T) {
+	var buf bytes.Buffer
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	c, err := newCastWriter(&buf, minimalHeader, clockFrom(base,
+		0, time.Second, 100*time.Millisecond))
+	assert.NoError(t, err)
+
+	c.mute()
+	c.mute() // reads no clock: already muted
+	assert.NoError(t, c.output([]byte("hidden")))
+	c.unmute()
+	c.unmute() // likewise, already running
+	assert.NoError(t, c.output([]byte("after")))
+	assert.NoError(t, c.close())
+
+	assert.EqualArrays(t, castLines(t, buf.Bytes()), []castLine{{"o", "after"}})
+	assert.EqualArrays(t, castGaps(t, buf.Bytes()), []float64{0.1})
+}
+
+// A run that ends muted still gets its exit event -- the status is the one
+// thing every recording has to end with.
+func TestCastExitUnmutes(t *testing.T) {
+	var buf bytes.Buffer
+	c, err := newCastWriter(&buf, minimalHeader, tickingClock(time.Millisecond))
+	assert.NoError(t, err)
+	c.mute()
+	assert.NoError(t, c.output([]byte("hidden")))
+	assert.NoError(t, c.exit(3))
+	assert.NoError(t, c.close())
+
+	assert.EqualArrays(t, castLines(t, buf.Bytes()), []castLine{{"x", "3"}})
+}

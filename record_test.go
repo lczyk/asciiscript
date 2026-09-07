@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -328,10 +329,11 @@ func TestSyncPromptStopsWhenInterrupted(t *testing.T) {
 }
 
 // promptsOnEnter makes the recorder stand in for the shell: one prompt per
-// line, and only once that line has been typed in full.
+// line, and only once that line has been typed in full. A silent command
+// arrives as one write rather than a key at a time, hence the suffix test.
 func promptsOnEnter(s *session, rec *recorder) {
 	rec.onWrite = func(p string) {
-		if p == "\n" {
+		if strings.HasSuffix(p, "\n") {
 			s.mon.mu.Lock()
 			s.mon.marks++
 			s.mon.mu.Unlock()
@@ -582,4 +584,91 @@ func TestMirrorWritesTheRecording(t *testing.T) {
 
 	got := output(readCast(t, path))
 	assert.Equal(t, got, emitted(s.mon.mark, 0)+"$ \x1b[6nhi\r\n")
+}
+
+// A silent command is run, not typed: the line goes in whole, at no delay, and
+// the terminal the take is made from is told what happened, since the take
+// itself never will be.
+func TestTypeAllRunsASilentCommandWholeAndUntyped(t *testing.T) {
+	sc, err := parseScript("a\n#$ silent\nrm -rf scratch\nb\n")
+	assert.NoError(t, err)
+
+	s, rec := newTestSession(t)
+	s.jitter = newJitter(0, 1)
+	s.cmdTimeout = time.Minute
+	promptsOnEnter(s, rec)
+
+	assert.NoError(t, s.typeAll(sc))
+	assert.EqualArrays(t, typedLines(rec), []string{"a\n", "rm -rf scratch\n", "b\n"})
+	assert.ContainsString(t, strings.Join(rec.events, "\x00"), "w:rm -rf scratch\n") // one write, not one per key
+	assert.ContainsString(t, warnings(s), "rm -rf scratch")
+	assert.ContainsString(t, warnings(s), "stays out of the recording")
+	assert.ContainsString(t, warnings(s), "held back from the recording")
+}
+
+// Nothing a silent command does reaches the recording -- not the line, not its
+// output, and not the prompt it lands back on, which would otherwise be drawn
+// a second time. The mute lifts at the next keystroke there is to record.
+func TestTypeAllKeepsASilentCommandOutOfTheRecording(t *testing.T) {
+	sc, err := parseScript("echo a\n#$ silent\nsecret\necho b\n")
+	assert.NoError(t, err)
+
+	s, rec := newTestSession(t)
+	s.cmdTimeout = time.Minute
+	s.captureInput = true
+	path := castInto(t, s)
+	// The shell stands in for itself: a prompt per line, and the echo of
+	// whatever was typed, which is what the recording is made of.
+	rec.onWrite = func(p string) {
+		_ = s.cast.output([]byte(p))
+		if strings.HasSuffix(p, "\n") {
+			s.mon.mu.Lock()
+			s.mon.marks++
+			s.mon.mu.Unlock()
+			_ = s.cast.output([]byte("$ "))
+		}
+	}
+
+	assert.NoError(t, s.typeAll(sc))
+	assert.NoError(t, s.cast.exit(0))
+	assert.NoError(t, s.cast.close())
+
+	var out, in strings.Builder
+	for _, e := range readCast(t, path) {
+		switch e.kind {
+		case "o":
+			out.WriteString(e.data)
+		case "i":
+			in.WriteString(e.data)
+		}
+	}
+	assert.Equal(t, out.String(), "echo a\n$ echo b\n$ ")
+	assert.Equal(t, in.String(), "echo a\necho b\n")
+}
+
+// The screen a take is made on shows the take: a silent command is off both,
+// and the only thing on the terminal that the recording doesn't have is
+// asciiscript's own reporting.
+func TestTypeAllHushesTheLiveEchoWithTheRecording(t *testing.T) {
+	sc, err := parseScript("echo a\n#$ silent\nsecret\necho b\n")
+	assert.NoError(t, err)
+
+	s, rec := newTestSession(t)
+	s.cmdTimeout = time.Minute
+	s.mon.mark = newPromptMarker(7)
+	var screen bytes.Buffer
+	s.mon.out = &screen
+	rec.onWrite = func(p string) {
+		s.mon.run(strings.NewReader(p)) // the shell echoing what was typed
+		if strings.HasSuffix(p, "\n") {
+			s.mon.mu.Lock()
+			s.mon.marks++
+			s.mon.mu.Unlock()
+		}
+	}
+
+	assert.NoError(t, s.typeAll(sc))
+	assert.Equal(t, screen.String(), "echo a\necho b\n")
+	assert.That(t, !strings.Contains(screen.String(), "secret"), "the silent command should not be on screen either")
+	assert.ContainsString(t, warnings(s), "secret") // reported, but only as an asciiscript: line
 }

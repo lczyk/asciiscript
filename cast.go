@@ -46,13 +46,16 @@ type castWriter struct {
 	w   *bufio.Writer
 	now func() time.Time // the clock; tests swap it out
 
-	mu     sync.Mutex
-	epoch  time.Time     // what event times are measured from
-	last   time.Duration // unquantised time of the previous event
-	carry  int64         // quantisation error, in ns, owed to the next interval
-	tail   []byte        // the start of a UTF-8 sequence the last output cut short
-	err    error         // the first write error; every call after it fails the same way
-	ended  bool          // the exit event is written, and nothing may follow it
+	mu      sync.Mutex
+	epoch   time.Time     // what event times are measured from
+	last    time.Duration // unquantised time of the previous event
+	carry   int64         // quantisation error, in ns, owed to the next interval
+	tail    []byte        // the start of a UTF-8 sequence the last output cut short
+	muted   bool          // events are being dropped and the clock is held
+	mutedAt time.Time     // when the hold started
+
+	err    error // the first write error; every call after it fails the same way
+	ended  bool  // the exit event is written, and nothing may follow it
 	closed bool
 }
 
@@ -69,6 +72,39 @@ func newCastWriter(w io.Writer, h castHeader, now func() time.Time) (*castWriter
 	}
 	c.epoch = c.now()
 	return c, nil
+}
+
+// mute stops the recording taking anything in, and holds its clock: what the
+// session prints while muted stays out of the file, and the time it takes is
+// taken off every event after it, so playback runs straight from the last
+// event before the mute to the first one after. Muting an already muted writer
+// does nothing, which is what makes a run of silent commands one single hold.
+func (c *castWriter) mute() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.muted {
+		return
+	}
+	c.muted, c.mutedAt = true, c.now()
+}
+
+// unmute lets events through again.
+func (c *castWriter) unmute() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resume()
+}
+
+// resume is unmute with c.mu held. Moving the epoch on by the hold is what
+// takes the muted stretch off every event still to come.
+func (c *castWriter) resume() {
+	if !c.muted {
+		return
+	}
+	c.muted = false
+	if held := c.now().Sub(c.mutedAt); held > 0 {
+		c.epoch = c.epoch.Add(held)
+	}
 }
 
 // output records bytes the session printed.
@@ -131,6 +167,7 @@ func (c *castWriter) exit(status int) error {
 	if c.err != nil || c.closed || c.ended {
 		return c.err
 	}
+	c.resume() // the exit event is written whatever the run was doing when it ended
 	c.flushTail()
 	c.event('x', strconv.Itoa(status))
 	c.ended = true
@@ -147,6 +184,7 @@ func (c *castWriter) close() error {
 	}
 	c.closed = true
 	if c.err == nil {
+		c.resume()
 		c.flushTail()
 	}
 	if err := c.w.Flush(); err != nil && c.err == nil {
@@ -174,7 +212,7 @@ func (c *castWriter) flushTail() {
 // event writes one event line, laid out as asciinema lays out its own, stamped
 // with the interval since the previous event. Called with c.mu held.
 func (c *castWriter) event(code byte, data string) {
-	if c.err != nil {
+	if c.err != nil || c.muted {
 		return
 	}
 	at := max(c.now().Sub(c.epoch), c.last)

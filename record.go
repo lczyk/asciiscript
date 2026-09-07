@@ -136,11 +136,18 @@ type mirror struct {
 	quiet bool
 	mark  promptMarker // prompt marker to tally
 	cast  *castWriter  // the recording; nil in tests that only count prompts
+	out   io.Writer    // where the live echo goes; nil for os.Stdout
 
 	// lent is set while the terminal is handed over. Queries then pass
 	// through to the real terminal, whose replies the keyboard is forwarding;
 	// the rest of the time nothing would forward them, so they're stripped.
 	lent atomic.Bool
+
+	// hushed is set while a silent command runs, and stops the live echo as
+	// well as the recording. The screen a take is made on shows the take:
+	// the only thing on it that the recording doesn't have is asciiscript's
+	// own "asciiscript:" lines.
+	hushed atomic.Bool
 
 	mu    sync.Mutex
 	tail  []byte // unmatched trailing bytes of the last read, in case a marker straddles two
@@ -165,14 +172,22 @@ func (m *mirror) run(r io.Reader) {
 			// queries and prompt markers are stripped from the live echo only:
 			// query replies would otherwise leak onto the prompt once recording
 			// ends, and the markers are ours rather than the session's.
-			if !m.quiet {
-				os.Stdout.Write(m.clean(buf[:n]))
+			if !m.quiet && !m.hushed.Load() {
+				_, _ = m.live().Write(m.clean(buf[:n]))
 			}
 		}
 		if err != nil {
 			return
 		}
 	}
+}
+
+// live is where the session is echoed as it is recorded.
+func (m *mirror) live() io.Writer {
+	if m.out != nil {
+		return m.out
+	}
+	return os.Stdout
 }
 
 // tally counts the prompt markers in buf -- whole sequences only, since the
@@ -356,7 +371,8 @@ func (s *session) syncPrompt(line string, before int) error {
 // typeAll waits for the recorded shell's first prompt -- the rcfile is loaded
 // and readline is listening -- then types every command in order, each line
 // waited on before the next. A command's `#$ pause` gets a marker in the
-// recording, placed where the typing resumes.
+// recording, placed where the typing resumes. A `#$ silent` one is run without
+// being typed, with the recording muted for as long as it takes.
 func (s *session) typeAll(sc *script) error {
 	ok, err := s.awaitPrompt(0, startTimeout)
 	if err != nil {
@@ -365,7 +381,41 @@ func (s *session) typeAll(sc *script) error {
 	if !ok {
 		return fmt.Errorf("the recorded shell showed no prompt within %s", startTimeout)
 	}
+
+	// A silent command mutes the recording and the live echo alike, and both
+	// stay muted through the prompt that follows: that prompt is one the take
+	// already has on screen, so letting it through would draw a second one.
+	// The mute is lifted at the next keystroke there is to record instead.
+	muted := false
+	mute := func() {
+		if muted {
+			return
+		}
+		muted = true
+		s.mon.hushed.Store(true)
+		if s.cast != nil {
+			s.cast.mute()
+		}
+	}
+	unmute := func() {
+		if !muted {
+			return
+		}
+		muted = false
+		s.mon.hushed.Store(false)
+		if s.cast != nil {
+			s.cast.unmute()
+		}
+	}
+
 	for _, c := range sc.commands {
+		if c.silent {
+			mute()
+			if err := s.runSilent(c); err != nil {
+				return err
+			}
+			continue
+		}
 		if c.handover {
 			fmt.Fprintln(s.warn, "asciiscript: the next command is yours -- the script picks up again once it drops you back at a prompt")
 		}
@@ -378,20 +428,29 @@ func (s *session) typeAll(sc *script) error {
 			// The pause the script asked for goes before the command, so
 			// before its first line only; the rest get the model's line gap.
 			var pause time.Duration
-			var mark func()
+			var atFirstKey func()
 			if j == 0 {
 				pause = c.pause
-				if pause > 0 && s.cast != nil {
-					mark = func() { _ = s.cast.marker(line) }
+				mark := pause > 0 && s.cast != nil
+				if muted || mark {
+					atFirstKey = func() {
+						unmute() // before the marker, which is an event like any other
+						if mark {
+							_ = s.cast.marker(line)
+						}
+					}
 				}
 			}
 			before := s.mon.marked()
-			if err := s.typeLine(line, c.delay, pause, mark); err != nil {
+			if err := s.typeLine(line, c.delay, pause, atFirstKey); err != nil {
 				return err
 			}
 			var err error
 			if c.handover && j == len(c.lines)-1 {
 				err = s.lendTerminal(before)
+				if err == nil {
+					fmt.Fprintln(s.warn, "asciiscript: the terminal is back -- the script carries on")
+				}
 			} else {
 				err = s.syncPrompt(line, before)
 			}
@@ -400,10 +459,39 @@ func (s *session) typeAll(sc *script) error {
 			}
 		}
 	}
+	unmute()
 	// A trailing pause holds the last prompt before the session is ended.
 	if sc.pause > 0 {
 		return s.sleep(s.jitter.linePause(0, s.scaled(sc.pause)))
 	}
+	return nil
+}
+
+// runSilent runs a command without typing it. Each line goes in whole rather
+// than keystroke by keystroke -- there is no typing to watch -- and is waited
+// for like any other. Nothing it does reaches the screen either, so it is
+// reported here instead: an "asciiscript:" line is the one thing the terminal
+// a take is made on has that the take does not.
+func (s *session) runSilent(c command) error {
+	name := c.lines[0]
+	fmt.Fprintf(s.warn, "asciiscript: running %q silently -- it stays out of the recording\n", name)
+	started := time.Now()
+	for _, line := range c.lines {
+		if s.cast != nil {
+			if err := s.cast.failed(); err != nil {
+				return err
+			}
+		}
+		before := s.mon.marked()
+		if _, err := io.WriteString(s.pty, line+"\n"); err != nil {
+			return fmt.Errorf("writing to pty failed: %w", err)
+		}
+		if err := s.syncPrompt(line, before); err != nil {
+			return err
+		}
+	}
+	fmt.Fprintf(s.warn, "asciiscript: %q took %s, held back from the recording\n",
+		name, time.Since(started).Round(time.Millisecond))
 	return nil
 }
 

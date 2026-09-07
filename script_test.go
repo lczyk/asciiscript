@@ -469,3 +469,43 @@ func TestParseScriptSkipsAShebang(t *testing.T) {
 	assert.NoError(t, err)
 	assert.EqualArrays(t, typed(later), []string{"echo hi", "#!not a shebang"})
 }
+
+func TestParseScriptSilent(t *testing.T) {
+	s, err := parseScript("echo a\n#$ silent - housekeeping\nrm -rf scratch\necho b\n")
+	assert.NoError(t, err)
+	assert.Len(t, s.commands, 3)
+	assert.That(t, !s.commands[0].silent, "the first command is typed")
+	assert.That(t, s.commands[1].silent, "the second is not")
+	assert.EqualArrays(t, s.commands[1].lines, []string{"rm -rf scratch"})
+	assert.That(t, !s.commands[2].silent, "and the control line does not carry on")
+
+	_, err = parseScript("echo a\n#$ silent\n")
+	assert.ErrorIs(t, err, errDangling)
+	assert.Error(t, err, "line 2")
+}
+
+// A silent command is neither typed nor watched, so the two control lines that
+// time the typing have nothing to time, and there is no terminal to hand over.
+// Either order is the same mistake, and is reported at the line that makes it.
+func TestParseScriptSilentRejectsWhatItCannotDo(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		is   error
+		line string
+	}{
+		{"#$ silent\n#$ delay 10\na\n", errSilentTiming, "line 2"},
+		{"#$ delay 10\n#$ silent\na\n", errSilentTiming, "line 2"},
+		{"#$ silent\n#$ pause 10\na\n", errSilentTiming, "line 2"},
+		{"#$ pause 10\n#$ silent\na\n", errSilentTiming, "line 2"},
+		{"#$ silent\n#$ handover\na\n", errSilentAlone, "line 2"},
+		{"#$ handover\n#$ silent\na\n", errSilentAlone, "line 2"},
+	} {
+		_, err := parseScript(tc.text)
+		assert.ErrorIs(t, err, tc.is, tc.text)
+		assert.Error(t, err, tc.line, tc.text)
+	}
+
+	// A zero pause asks for nothing, so it conflicts with nothing.
+	_, err := parseScript("#$ silent\n#$ pause 0\na\n")
+	assert.NoError(t, err)
+}

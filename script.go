@@ -35,6 +35,8 @@ var (
 	errBadArg       = errors.New("invalid command argument")
 	errArgRange     = errors.New("argument out of range")
 	errDangling     = errors.New("control line with no command after it to apply to")
+	errSilentAlone  = errors.New("`#$ silent` and `#$ handover` can't both apply to one command")
+	errSilentTiming = errors.New("a command run by `#$ silent` isn't typed, so `#$ delay` and `#$ pause` have nothing to time")
 	errUnterminated = errors.New("command runs past the end of the script")
 	errInterrupted  = errors.New("interrupted")
 )
@@ -47,6 +49,7 @@ type command struct {
 	delay    time.Duration // between keystrokes
 	pause    time.Duration // before the first keystroke; zero for the timing model's own line gap
 	handover bool          // hand the terminal over once the last line is typed
+	silent   bool          // run it without typing it, and keep it out of the recording
 }
 
 // script is a parsed script: the commands to type in order, and how long to
@@ -116,11 +119,28 @@ func parseScript(text string) (*script, error) {
 			}
 			switch kind {
 			case "delay":
+				if next.silent {
+					return nil, fmt.Errorf("%w (line %d)", errSilentTiming, i+1)
+				}
 				next.delay, delaySet = d, true
 			case "pause":
+				if next.silent && d > 0 {
+					return nil, fmt.Errorf("%w (line %d)", errSilentTiming, i+1)
+				}
 				next.pause = d
 			case "handover":
+				if next.silent {
+					return nil, fmt.Errorf("%w (line %d)", errSilentAlone, i+1)
+				}
 				next.handover = true
+			case "silent":
+				if next.handover {
+					return nil, fmt.Errorf("%w (line %d)", errSilentAlone, i+1)
+				}
+				if delaySet || next.pause > 0 {
+					return nil, fmt.Errorf("%w (line %d)", errSilentTiming, i+1)
+				}
+				next.silent = true
 			}
 			ctrlAt = i + 1
 			continue
@@ -137,7 +157,7 @@ func parseScript(text string) (*script, error) {
 	}
 	// With nothing left to type, a pause still means something: hold the last
 	// prompt that long before the session is ended. The others don't.
-	if delaySet || next.handover {
+	if delaySet || next.handover || next.silent {
 		return nil, fmt.Errorf("%w (line %d)", errDangling, ctrlAt)
 	}
 	s.pause = next.pause
@@ -154,7 +174,7 @@ func parseCtrl(text string) (kind string, d time.Duration, err error) {
 	case "delay", "pause":
 		d, err = millis(tokens[1:])
 		return kind, d, err
-	case "handover":
+	case "handover", "silent":
 		return kind, 0, nil
 	default:
 		return "", 0, errUnknownCtrl

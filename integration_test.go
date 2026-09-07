@@ -300,3 +300,19 @@ func TestAsciinemaReadsTheRecording(t *testing.T) {
 	assert.NoError(t, err, "asciinema should round-trip the recording")
 	assert.Equal(t, output(readCast(t, again)), output(readCast(t, out)))
 }
+
+// The whole point of `#$ silent`: the command runs, and the recording shows
+// neither what it printed nor how long it took.
+func TestSilentCommandLeavesNoTrace(t *testing.T) {
+	events := capture(t, "echo alpha\n#$ silent\nsleep 1; echo hidden\necho bravo\n", options{})
+
+	got := output(events)
+	assert.ContainsString(t, got, "alpha\r\n")
+	assert.ContainsString(t, got, "bravo\r\n")
+	assert.That(t, !strings.Contains(got, "hidden"), "the silent command should be nowhere in the recording")
+	assert.That(t, !strings.Contains(got, "sleep 1"), "nor should the line that ran it")
+
+	alpha, bravo := events[submitted(t, events, "echo alpha")], events[submitted(t, events, "echo bravo")]
+	assert.That(t, bravo.at-alpha.at < 1,
+		"the second the silent command took should not be in the timeline either")
+}
