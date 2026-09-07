@@ -125,12 +125,33 @@ $ asciiscript --cols 100 --rows 30 demo.sh demo.cast
 $ asciiscript --title "Installing it" --idle-time-limit 2 demo.sh demo.cast
 ```
 
-The script can also come from standard input, as `-`.
+The script can also come from standard input, as `-`. The outfile can be left off, and the
+recording then takes the script's own name -- `demo.sh` records to `demo.cast`, beside it.
+A script read from stdin has no name to take, so that one needs an outfile.
 
 The recording is 80x24 unless told otherwise, whatever terminal it's made from: a recording is
 for other people's screens. Nothing in it depends on that size, though: the recorded shell
 runs without readline, so what's typed is echoed by the terminal itself and a long line wraps
 wherever the recording is played, not where it was made.
+
+## Shebang
+
+A script can carry its own flags and be run directly:
+
+```sh
+#!/usr/bin/env -S asciiscript --cols 100 --rows 30 --idle-time-limit 2
+echo "recorded by ./demo.sh, into demo.cast"
+```
+
+```sh
+$ chmod +x demo.sh
+$ ./demo.sh
+```
+
+The `#!` line is the kernel's, not the shell's: it is dropped rather than typed, so it stays
+out of the recording. Only on the first line -- anywhere else `#!` is an ordinary comment, and
+ordinary comments are typed like anything else. `env -S` is what splits the flags into separate
+arguments; without it the whole tail is passed as one and none of them are read.
 
 ## Waiting
 

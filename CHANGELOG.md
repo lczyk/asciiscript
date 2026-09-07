@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `asciinema play -m` pauses there. The trailing pause at the end of a script has no command
   and gets no marker.
 - A resize during a handover is recorded as a resize event.
+- A `#!` on a script's first line is dropped rather than typed, so a script can carry the flags
+  it is recorded with and be run directly: `#!/usr/bin/env -S asciiscript --cols 100`.
+- The outfile is optional: without one the recording takes the script's name, `demo.sh` to
+  `demo.cast`. A script read from stdin still needs one named.
 
 ### Changed
 
