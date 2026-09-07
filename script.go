@@ -14,6 +14,11 @@ import (
 // ctrlPrefix marks a control line in a script, e.g. "#$ delay 100".
 const ctrlPrefix = "#$"
 
+// commentMark, right after ctrlPrefix, makes the line a note to the reader of
+// the script: "#$| like this". Ordinary `#` comments are typed like anything
+// else and show up in the recording; these are not.
+const commentMark = "|"
+
 // defaultDelay is the per-keystroke delay a command types at unless a
 // `#$ delay` in front of it says otherwise.
 const defaultDelay = 40 * time.Millisecond
@@ -92,6 +97,9 @@ func parseScript(text string) (*script, error) {
 			continue
 		}
 		if rest, ok := strings.CutPrefix(line, ctrlPrefix); ok {
+			if strings.HasPrefix(strings.TrimLeft(rest, " \t"), commentMark) {
+				continue // a note to the reader: applies to nothing, typed nowhere
+			}
 			kind, d, err := parseCtrl(rest)
 			if err != nil {
 				return nil, fmt.Errorf("%w (line %d)", err, i+1)

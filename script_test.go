@@ -78,6 +78,26 @@ func TestParseScriptCtrlLooseSpacing(t *testing.T) {
 	}
 }
 
+// "#$|" is a note to whoever reads the script: it is neither typed nor a
+// control line, so it applies to nothing and leaves no dangling error behind.
+// An ordinary "#" comment is typed like any other line.
+func TestParseScriptComment(t *testing.T) {
+	s, err := parseScript("#$| a note\n#$|no space needed\n#$ | or a spaced one\n#$ delay 10\necho a\n# typed\n#$| done\n")
+	assert.NoError(t, err)
+	assert.EqualArrays(t, typed(s), []string{"echo a", "# typed"})
+	assert.Equal(t, s.commands[0].delay, 10*time.Millisecond)
+	assert.Equal(t, s.commands[1].delay, defaultDelay)
+
+	// Nothing in a comment can be a bad control line.
+	_, err = parseScript("#$| delay abc\necho a\n")
+	assert.NoError(t, err)
+
+	// Inside a command the line is content, like every other "#$" line.
+	c, err := parseScript("cat <<EOF\n#$| kept\nEOF\n")
+	assert.NoError(t, err)
+	assert.EqualArrays(t, typed(c), []string{"cat <<EOF", "#$| kept", "EOF"})
+}
+
 func TestParseScriptUnknownCtrl(t *testing.T) {
 	_, err := parseScript("#$ bogus 1\na")
 	assert.ErrorIs(t, err, errUnknownCtrl)
