@@ -208,11 +208,10 @@ that the recording doesn't have are asciiscript's own, the ones that start `asci
 rather than a line quietly ignored: there is no typing to time, and nothing to hand over that
 anyone can see.
 
-Which leaves nothing to watch, so asciiscript reports it -- the command, and how long it held
-the clock for:
+Which leaves nothing to watch, so asciiscript reports it once it is done -- the command, and
+how long it held the clock for:
 
 ```
-asciiscript: running "rm -rf demo-scratch && mkdir demo-scratch && cd demo-scratch" silently -- it stays out of the recording
 asciiscript: "rm -rf demo-scratch && mkdir demo-scratch && cd demo-scratch" took 12ms, held back from the recording
 ```
 
