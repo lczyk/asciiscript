@@ -7,13 +7,14 @@
 #
 # Idle gaps are capped at IDLE seconds, except the ones a `#$ pause` asked for
 # (the gap before its marker, and the trailing pause before the shell exits).
-# Needs asciinema 3.x, agg, ffmpeg and jq.
+# Needs asciinema 3.x, agg, ffmpeg, jq and fontconfig, plus the FONT installed.
 set -e
 
 IDLE="${IDLE:-2}"             # cap on any gap no `#$ pause` asked for, seconds
 LEAD="${LEAD:-2}"             # hold on the first prompt before typing starts, seconds
 TAIL="${TAIL:-1}"             # hold on the last frame, seconds
 THEME="${THEME:-monokai}"
+FONT="${FONT:-Ubuntu Sans Mono}"
 FONT_SIZE="${FONT_SIZE:-40}"
 WIDTH="${WIDTH:-2560}"
 HEIGHT="${HEIGHT:-1440}"
@@ -45,9 +46,11 @@ function main() {
     [ -f "${in}" ] || _fail "usage: to-video.sh <in.cast> [out.mp4|out.gif]"
     case "${out}" in (*.mp4|*.gif) ;; (*) _fail "output must be .mp4 or .gif: ${out}" ;; esac
     head -n 1 "${in}" | grep -q '"version": *3' || _fail "not an asciicast v3 recording: ${in}"
-    for tool in asciinema agg ffmpeg jq; do
+    for tool in asciinema agg ffmpeg jq fc-list; do
         command -v "${tool}" >/dev/null || _fail "${tool} not found"
     done
+    # agg falls back to its own font list without a word
+    [ -n "$(fc-list "${FONT}")" ] || _fail "font not installed: ${FONT}"
 
     local tmp
     tmp="$(mktemp -d)"
@@ -57,7 +60,7 @@ function main() {
     # agg reads asciicast v2 only
     asciinema convert -f asciicast-v2 --overwrite "${tmp}/retimed.cast" "${tmp}/v2.cast" >/dev/null
     # the idle cap is already applied above; agg's own would flatten the pauses too
-    agg --theme "${THEME}" --font-size "${FONT_SIZE}" --idle-time-limit 3600 \
+    agg --theme "${THEME}" --font-family "${FONT}" --font-size "${FONT_SIZE}" --idle-time-limit 3600 \
         --last-frame-duration "${TAIL}" "${tmp}/v2.cast" "${tmp}/out.gif" >/dev/null
 
     if [ "${out}" != "${out%.gif}" ]; then
