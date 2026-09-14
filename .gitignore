@@ -2,4 +2,5 @@
 /asciiscript.exe
 /bin/
 /*.sh
+!/to-video.sh
 *.cast
