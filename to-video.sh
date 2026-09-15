@@ -45,7 +45,7 @@ function main() {
     local out="${2:-${1%.cast}.mp4}"
     [ -f "${in}" ] || _fail "usage: to-video.sh <in.cast> [out.mp4|out.gif]"
     case "${out}" in (*.mp4|*.gif) ;; (*) _fail "output must be .mp4 or .gif: ${out}" ;; esac
-    head -n 1 "${in}" | grep -q '"version": *3' || _fail "not an asciicast v3 recording: ${in}"
+    head -n 1 "${in}" | grep -q '"version": *3' || _fail "not an asciicast v3 recording: ${in} (./v2-2-v3.sh converts v2)"
     for tool in asciinema agg ffmpeg jq; do
         command -v "${tool}" >/dev/null || _fail "${tool} not found"
     done
